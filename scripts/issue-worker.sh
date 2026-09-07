@@ -32,6 +32,8 @@ PROMPT_FILE=""
 LAST_MESSAGE_FILE=""
 ASKPASS_FILE=""
 PR_BODY_FILE=""
+GIT_CONFIG_SNAPSHOT=""
+GIT_CONFIG_PATH=""
 BRANCH=""
 FAILURE_HANDLED=0
 
@@ -45,6 +47,32 @@ require_command() {
 
 ghw() {
   GH_TOKEN="$TOKEN" gh "$@"
+}
+
+create_askpass() {
+  ASKPASS_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/issue-worker-askpass.XXXXXX")"
+  cat > "$ASKPASS_FILE" <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' 'x-access-token' ;;
+  *) printf '%s\n' "$ISSUE_WORKER_GIT_TOKEN" ;;
+esac
+ASKPASS
+  chmod 700 "$ASKPASS_FILE"
+}
+
+authenticated_git() {
+  local status=0
+  create_askpass
+
+  ISSUE_WORKER_GIT_TOKEN="$TOKEN" \
+  GIT_ASKPASS="$ASKPASS_FILE" \
+  GIT_TERMINAL_PROMPT=0 \
+    git "$@" || status=$?
+
+  rm -f "$ASKPASS_FILE"
+  ASKPASS_FILE=""
+  return "$status"
 }
 
 ensure_label() {
@@ -92,6 +120,7 @@ cleanup() {
   [[ -n "$LAST_MESSAGE_FILE" && -f "$LAST_MESSAGE_FILE" ]] && rm -f "$LAST_MESSAGE_FILE" || true
   [[ -n "$ASKPASS_FILE" && -f "$ASKPASS_FILE" ]] && rm -f "$ASKPASS_FILE" || true
   [[ -n "$PR_BODY_FILE" && -f "$PR_BODY_FILE" ]] && rm -f "$PR_BODY_FILE" || true
+  [[ -n "$GIT_CONFIG_SNAPSHOT" && -f "$GIT_CONFIG_SNAPSHOT" ]] && rm -f "$GIT_CONFIG_SNAPSHOT" || true
 }
 
 handle_failure() {
@@ -136,6 +165,8 @@ trap cleanup EXIT
 require_command git
 require_command gh
 require_command codex
+require_command env
+require_command tr
 
 cd "$WORKSPACE"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fatal "The caller repository is not checked out."
@@ -178,12 +209,21 @@ log "Base branch: ${BASE_BRANCH}"
 # worktrees and makes retries independent instead of force-updating old PRs.
 BRANCH="${BRANCH_PREFIX}${ISSUE_NUMBER}-${RUN_ID}"
 
-git fetch --no-tags origin "$BASE_BRANCH"
+# checkout uses persist-credentials:false, so private fetches must receive the
+# short-lived workflow token explicitly without writing it into .git/config.
+authenticated_git fetch --no-tags origin "$BASE_BRANCH"
 git reset --hard >/dev/null
 git clean -fd >/dev/null
 git switch --detach "origin/${BASE_BRANCH}" >/dev/null
 git branch -D "$BRANCH" >/dev/null 2>&1 || true
 git switch -c "$BRANCH" >/dev/null
+
+# Snapshot local Git configuration before Codex. The model is told not to touch Git
+# metadata, but restoring this file prevents repository-local Git config tampering from
+# influencing wrapper-side status/add/commit/push operations after the sandbox exits.
+GIT_CONFIG_PATH="$(git rev-parse --git-path config)"
+GIT_CONFIG_SNAPSHOT="$(mktemp "${RUNNER_TEMP:-/tmp}/issue-worker-git-config.XXXXXX")"
+cat "$GIT_CONFIG_PATH" > "$GIT_CONFIG_SNAPSHOT"
 
 PROMPT_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/issue-worker-prompt.XXXXXX")"
 LAST_MESSAGE_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/issue-worker-last-message.XXXXXX")"
@@ -244,10 +284,28 @@ case "$ALLOW_NETWORK_NORMALIZED" in
     ;;
 esac
 
-# TOKEN is a non-exported shell variable. Codex receives no GitHub token from this wrapper.
+# Start Codex with a deliberately small environment. GitHub/Actions runtime variables,
+# including any runner-internal credentials, are not inherited by model-generated
+# commands. Local Codex auth remains available through the runner user's HOME/CODEX_HOME.
+CODEX_ENV=(
+  "HOME=${HOME:-}"
+  "PATH=${PATH:-/usr/bin:/bin}"
+  "TMPDIR=${TMPDIR:-/tmp}"
+)
+[[ -n "${USER:-}" ]] && CODEX_ENV+=("USER=${USER}")
+[[ -n "${LOGNAME:-}" ]] && CODEX_ENV+=("LOGNAME=${LOGNAME}")
+[[ -n "${SHELL:-}" ]] && CODEX_ENV+=("SHELL=${SHELL}")
+[[ -n "${LANG:-}" ]] && CODEX_ENV+=("LANG=${LANG}")
+[[ -n "${LC_ALL:-}" ]] && CODEX_ENV+=("LC_ALL=${LC_ALL}")
+[[ -n "${CODEX_HOME:-}" ]] && CODEX_ENV+=("CODEX_HOME=${CODEX_HOME}")
+
 log "Starting Codex on self-hosted runner."
-codex "${CODEX_ARGS[@]}" - < "$PROMPT_FILE"
+env -i "${CODEX_ENV[@]}" codex "${CODEX_ARGS[@]}" - < "$PROMPT_FILE"
 log "Codex finished."
+
+# Restore trusted local Git configuration before any wrapper-side Git operation.
+cat "$GIT_CONFIG_SNAPSHOT" > "$GIT_CONFIG_PATH"
+[[ "$(git branch --show-current)" == "$BRANCH" ]] || fatal "Codex changed Git branch metadata; refusing wrapper-side Git operations."
 
 if [[ -n "$VERIFY_COMMAND" ]]; then
   log "Running caller-supplied verification command."
@@ -280,25 +338,8 @@ git add -A
 # Codex must not be able to execute a commit hook outside the Codex sandbox.
 git -c core.hooksPath=/dev/null commit -m "Implement #${ISSUE_NUMBER} via issue-worker" >/dev/null
 
-# actions/checkout uses persist-credentials:false, so the checked-out .git directory
-# does not contain the workflow token. Create a short-lived askpass helper only for push.
-ASKPASS_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/issue-worker-askpass.XXXXXX")"
-cat > "$ASKPASS_FILE" <<'ASKPASS'
-#!/bin/sh
-case "$1" in
-  *Username*) printf '%s\n' 'x-access-token' ;;
-  *) printf '%s\n' "$ISSUE_WORKER_PUSH_TOKEN" ;;
-esac
-ASKPASS
-chmod 700 "$ASKPASS_FILE"
-
-ISSUE_WORKER_PUSH_TOKEN="$TOKEN" \
-GIT_ASKPASS="$ASKPASS_FILE" \
-GIT_TERMINAL_PROMPT=0 \
-git push "https://github.com/${REPOSITORY}.git" "HEAD:refs/heads/${BRANCH}" >/dev/null
-
-rm -f "$ASKPASS_FILE"
-ASKPASS_FILE=""
+# Push with the same short-lived credential helper pattern used for private fetches.
+authenticated_git push "https://github.com/${REPOSITORY}.git" "HEAD:refs/heads/${BRANCH}" >/dev/null
 
 PR_BODY_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/issue-worker-pr-body.XXXXXX")"
 {
