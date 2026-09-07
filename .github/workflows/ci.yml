@@ -15,7 +15,9 @@ jobs:
         with:
           fetch-depth: 2
       - name: Validate Bash syntax
-        run: bash -n scripts/*.sh
+        run: bash -n scripts/*.sh tests/*.sh
+      - name: Run helper tests
+        run: bash tests/test-helpers.sh
       - name: Check whitespace errors in latest change
         run: git diff-tree --check --root -r HEAD
 
