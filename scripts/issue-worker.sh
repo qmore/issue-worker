@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # issue-worker
 # Orchestrates a trusted GitHub Issue -> Codex local edit -> branch -> PR flow.
-# This script intentionally keeps the GitHub token out of the Codex child process.
+# The GitHub token is deliberately kept out of the Codex child process.
 
 TOKEN="${ISSUE_WORKER_GITHUB_TOKEN:-}"
 unset ISSUE_WORKER_GITHUB_TOKEN
@@ -31,19 +31,16 @@ RUN_URL="${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}"
 PROMPT_FILE=""
 LAST_MESSAGE_FILE=""
 ASKPASS_FILE=""
+PR_BODY_FILE=""
 BRANCH=""
+FAILURE_HANDLED=0
 
 log() {
   printf '[issue-worker] %s\n' "$*"
 }
 
-fail() {
-  log "ERROR: $*"
-  exit 1
-}
-
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || fail "Required command '$1' was not found on the self-hosted runner."
+  command -v "$1" >/dev/null 2>&1 || fatal "Required command '$1' was not found on the self-hosted runner."
 }
 
 ghw() {
@@ -92,15 +89,25 @@ set_multiline_output_from_file() {
 
 cleanup() {
   [[ -n "$PROMPT_FILE" && -f "$PROMPT_FILE" ]] && rm -f "$PROMPT_FILE" || true
+  [[ -n "$LAST_MESSAGE_FILE" && -f "$LAST_MESSAGE_FILE" ]] && rm -f "$LAST_MESSAGE_FILE" || true
   [[ -n "$ASKPASS_FILE" && -f "$ASKPASS_FILE" ]] && rm -f "$ASKPASS_FILE" || true
+  [[ -n "$PR_BODY_FILE" && -f "$PR_BODY_FILE" ]] && rm -f "$PR_BODY_FILE" || true
 }
 
-on_error() {
-  local status=$?
-  set +e
-  cleanup
+handle_failure() {
+  local status="${1:-1}"
+  local message="${2:-Worker command failed.}"
 
-  if [[ -n "$TOKEN" && -n "$REPOSITORY" && -n "$ISSUE_NUMBER" ]]; then
+  if [[ "$FAILURE_HANDLED" == "1" ]]; then
+    exit "$status"
+  fi
+  FAILURE_HANDLED=1
+
+  trap - ERR
+  set +e
+  log "ERROR: ${message}"
+
+  if [[ -n "$TOKEN" && -n "$REPOSITORY" && -n "$ISSUE_NUMBER" ]] && command -v gh >/dev/null 2>&1; then
     ensure_label "$FAILED_LABEL" "d73a4a" "issue-worker failed"
     remove_label "$WORKING_LABEL"
     remove_label "$REVIEW_LABEL"
@@ -109,33 +116,41 @@ on_error() {
       --body "issue-worker failed. Review the Actions log: ${RUN_URL}" >/dev/null 2>&1 || true
   fi
 
-  log "Worker failed with exit code ${status}."
+  cleanup
   exit "$status"
 }
 
-trap on_error ERR
+fatal() {
+  handle_failure 1 "$*"
+}
+
+trap 'handle_failure $? "An unexpected command failed."' ERR
 trap cleanup EXIT
 
-[[ -n "$TOKEN" ]] || fail "github-token is required."
-[[ -n "$ISSUE_NUMBER" ]] || fail "issue-number is required."
-[[ -n "$REPOSITORY" ]] || fail "GITHUB_REPOSITORY is not set."
-[[ -n "$ACTOR" ]] || fail "GITHUB_ACTOR is not set."
+[[ -n "$TOKEN" ]] || fatal "github-token is required."
+[[ -n "$ISSUE_NUMBER" ]] || fatal "issue-number is required."
+[[ -n "$REPOSITORY" ]] || fatal "GITHUB_REPOSITORY is not set."
+[[ -n "$ACTOR" ]] || fatal "GITHUB_ACTOR is not set."
+[[ -n "${GITHUB_OUTPUT:-}" ]] || fatal "GITHUB_OUTPUT is not set; issue-worker must run as a GitHub Action."
 
 require_command git
 require_command gh
 require_command codex
 
 cd "$WORKSPACE"
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "The caller repository is not checked out."
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fatal "The caller repository is not checked out."
 
 # Fail closed unless the actor who caused the workflow run has push permission.
 # For an issues:labeled workflow, github.actor is the user who applied the label.
-CAN_PUSH="$(ghw api "repos/${REPOSITORY}/collaborators/${ACTOR}/permission" \
-  --jq '.user.permissions.push // false' 2>/dev/null || printf 'false')"
-[[ "$CAN_PUSH" == "true" ]] || fail "Actor '${ACTOR}' does not have write-level access to '${REPOSITORY}', or permission could not be verified."
+CAN_PUSH=""
+if ! CAN_PUSH="$(ghw api "repos/${REPOSITORY}/collaborators/${ACTOR}/permission" \
+  --jq '.user.permissions.push // false' 2>/dev/null)"; then
+  fatal "Could not verify repository permission for actor '${ACTOR}'."
+fi
+[[ "$CAN_PUSH" == "true" ]] || fatal "Actor '${ACTOR}' does not have write-level access to '${REPOSITORY}'."
 
 ISSUE_STATE="$(ghw issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json state --jq '.state')"
-[[ "$ISSUE_STATE" == "OPEN" ]] || fail "Issue #${ISSUE_NUMBER} is not open."
+[[ "$ISSUE_STATE" == "OPEN" ]] || fatal "Issue #${ISSUE_NUMBER} is not open."
 
 ISSUE_TITLE="$(ghw issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json title --jq '.title')"
 ISSUE_BODY="$(ghw issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json body --jq '.body // ""')"
@@ -143,7 +158,7 @@ ISSUE_BODY="$(ghw issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json body --
 if [[ -z "$BASE_BRANCH" ]]; then
   BASE_BRANCH="$(ghw repo view "$REPOSITORY" --json defaultBranchRef --jq '.defaultBranchRef.name')"
 fi
-[[ -n "$BASE_BRANCH" ]] || fail "Could not determine the base branch."
+[[ -n "$BASE_BRANCH" ]] || fatal "Could not determine the base branch."
 
 ensure_label "$WORKING_LABEL" "fbca04" "issue-worker is implementing this Issue"
 ensure_label "$REVIEW_LABEL" "0e8a16" "issue-worker opened a pull request for review"
@@ -216,14 +231,16 @@ if [[ -n "$CODEX_EFFORT" ]]; then
   CODEX_ARGS+=(-c "model_reasoning_effort=\"${CODEX_EFFORT}\"")
 fi
 
-case "${ALLOW_NETWORK,,}" in
+# macOS ships Bash 3.2, which does not support ${var,,} lowercase expansion.
+ALLOW_NETWORK_NORMALIZED="$(printf '%s' "$ALLOW_NETWORK" | tr '[:upper:]' '[:lower:]')"
+case "$ALLOW_NETWORK_NORMALIZED" in
   true|1|yes|on)
     CODEX_ARGS+=(-c 'sandbox_workspace_write.network_access=true')
     ;;
   false|0|no|off|'')
     ;;
   *)
-    fail "allow-network must be true or false."
+    fatal "allow-network must be true or false."
     ;;
 esac
 
@@ -303,6 +320,7 @@ PR_URL="$(ghw pr create \
   --title "[Codex] #${ISSUE_NUMBER} ${ISSUE_TITLE}" \
   --body-file "$PR_BODY_FILE")"
 rm -f "$PR_BODY_FILE"
+PR_BODY_FILE=""
 
 remove_label "$WORKING_LABEL"
 add_label "$REVIEW_LABEL"
