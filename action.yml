@@ -1,0 +1,102 @@
+name: Issue Worker
+description: Turn a trusted GitHub Issue into a local Codex implementation job on a self-hosted runner.
+author: qmore
+
+branding:
+  icon: cpu
+  color: gray-dark
+
+inputs:
+  github-token:
+    description: Caller repository GITHUB_TOKEN. Requires contents/issues/pull-requests write permissions.
+    required: true
+  issue-number:
+    description: GitHub Issue number to implement.
+    required: true
+  base-branch:
+    description: Base branch for the generated branch and pull request. Empty uses the repository default branch.
+    required: false
+    default: ""
+  trigger-label:
+    description: Trigger label removed when work starts.
+    required: false
+    default: codex:run
+  working-label:
+    description: Label applied while Codex is working.
+    required: false
+    default: codex:working
+  review-label:
+    description: Label applied after a pull request is created.
+    required: false
+    default: codex:review
+  failed-label:
+    description: Label applied if the worker fails.
+    required: false
+    default: codex:failed
+  no-change-label:
+    description: Label applied if Codex makes no repository changes.
+    required: false
+    default: codex:no-change
+  branch-prefix:
+    description: Prefix for generated branches.
+    required: false
+    default: codex/issue-
+  verify-command:
+    description: Optional trusted shell command to run after Codex. Empty disables wrapper-side verification.
+    required: false
+    default: ""
+  codex-model:
+    description: Optional Codex model override. Empty uses the runner's Codex default.
+    required: false
+    default: ""
+  codex-effort:
+    description: Optional Codex reasoning effort override. Empty uses the runner's Codex default.
+    required: false
+    default: ""
+  allow-network:
+    description: Allow network access inside the Codex workspace-write sandbox for this run.
+    required: false
+    default: "false"
+
+outputs:
+  result:
+    description: One of review or no-change.
+    value: ${{ steps.worker.outputs.result }}
+  branch:
+    description: Generated branch name.
+    value: ${{ steps.worker.outputs.branch }}
+  pr-url:
+    description: Pull request URL when a PR was created.
+    value: ${{ steps.worker.outputs.pr-url }}
+  final-message:
+    description: Final message returned by Codex.
+    value: ${{ steps.worker.outputs.final-message }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check out caller repository
+      uses: actions/checkout@v6
+      with:
+        token: ${{ inputs.github-token }}
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Run Issue Worker
+      id: worker
+      shell: bash
+      env:
+        ISSUE_WORKER_GITHUB_TOKEN: ${{ inputs.github-token }}
+        ISSUE_WORKER_ISSUE_NUMBER: ${{ inputs.issue-number }}
+        ISSUE_WORKER_BASE_BRANCH: ${{ inputs.base-branch }}
+        ISSUE_WORKER_TRIGGER_LABEL: ${{ inputs.trigger-label }}
+        ISSUE_WORKER_WORKING_LABEL: ${{ inputs.working-label }}
+        ISSUE_WORKER_REVIEW_LABEL: ${{ inputs.review-label }}
+        ISSUE_WORKER_FAILED_LABEL: ${{ inputs.failed-label }}
+        ISSUE_WORKER_NO_CHANGE_LABEL: ${{ inputs.no-change-label }}
+        ISSUE_WORKER_BRANCH_PREFIX: ${{ inputs.branch-prefix }}
+        ISSUE_WORKER_VERIFY_COMMAND: ${{ inputs.verify-command }}
+        ISSUE_WORKER_CODEX_MODEL: ${{ inputs.codex-model }}
+        ISSUE_WORKER_CODEX_EFFORT: ${{ inputs.codex-effort }}
+        ISSUE_WORKER_ALLOW_NETWORK: ${{ inputs.allow-network }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/issue-worker.sh"

@@ -1,0 +1,50 @@
+# Copy this file to .github/workflows/issue-worker.yml in the PRIVATE target repository.
+#
+# Register a repository-level or Organization-level self-hosted runner that is
+# visible to this repository and give it the custom label `codex`.
+
+name: Issue Worker
+
+on:
+  issues:
+    types: [labeled]
+
+# One runner process accepts one job at a time, but repository-level concurrency
+# also prevents accidental duplicate runs for the same repository.
+concurrency:
+  group: issue-worker-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    # Label application is the explicit authorization signal. issue-worker also
+    # verifies that github.actor has write-level repository access.
+    if: github.event.label.name == 'codex:run'
+
+    # Choose the runner in the CALLER repository. This works with either a
+    # repository-level runner or an Organization-level runner exposed to the repo.
+    runs-on: [self-hosted, codex]
+    timeout-minutes: 60
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Implement Issue with local Codex
+        uses: qmore/issue-worker@main
+        with:
+          github-token: ${{ github.token }}
+          issue-number: ${{ github.event.issue.number }}
+
+          # Optional examples:
+          # base-branch: develop
+          # codex-model: gpt-5.6-sol
+          # codex-effort: high
+          # allow-network: 'false'
+          # verify-command: './scripts/verify.sh'
+
+# Production recommendation:
+# Replace @main with a release tag (for example @v1) or, for maximum supply-chain
+# stability, a full commit SHA.
