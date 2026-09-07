@@ -12,10 +12,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
       - name: Validate Bash syntax
         run: bash -n scripts/issue-worker.sh
-      - name: Check whitespace errors
-        run: git diff --check HEAD~0
+      - name: Check whitespace errors in latest change
+        run: git diff-tree --check --root -r HEAD
 
   action-metadata:
     runs-on: ubuntu-latest
