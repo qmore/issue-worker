@@ -1,0 +1,284 @@
+# LLM setup guide — standalone daemon
+
+This guide is for an LLM/coding agent asked to configure the experimental standalone `qmore/issue-worker` daemon on a trusted macOS machine.
+
+The goal is to achieve:
+
+```text
+GitHub Issue + codex:ready
+        |
+        | outbound HTTPS polling
+        v
+local issue-worker daemon
+        |
+        v
+Codex CLI -> verify -> branch -> PR
+```
+
+Do **not** register a GitHub self-hosted runner for this mode.
+
+## Safety invariants
+
+The setup agent must follow all of these rules:
+
+1. Never ask the user to paste a GitHub PAT, Codex credential, API key, SSH private key, password, or macOS Keychain content into chat.
+2. Never commit credentials or put them in Issues, repository files, logs, prompts, or documentation.
+3. Use a trusted **private** target repository for the daemon MVP.
+4. Keep the repository list explicit; do not silently broaden access to an entire Organization.
+5. Do not enable Codex network access unless the user/project explicitly requires it.
+6. Do not use Codex sandbox-bypass flags.
+7. Do not configure multiple daemons against the same repository in the MVP; distributed locking is not implemented yet.
+8. Do not install a launchd service unless service support is explicitly present in the current issue-worker version. The MVP runs in the foreground.
+
+## 1. Check the machine
+
+Expected target:
+
+```text
+macOS
+trusted local worker account
+outbound HTTPS access to GitHub/OpenAI
+no inbound port required
+```
+
+Check:
+
+```bash
+uname -a
+git --version
+go version
+codex --version
+```
+
+If Go is not installed, install a current supported Go toolchain before building the prototype. Do not introduce Python/Node runtimes solely for issue-worker.
+
+## 2. Obtain issue-worker
+
+Until release binaries/Homebrew packaging exist:
+
+```bash
+git clone https://github.com/qmore/issue-worker.git
+cd issue-worker
+git switch feat/daemon-mvp
+./scripts/install-daemon.sh
+```
+
+If `~/.local/bin` is not on PATH, follow the installer's printed PATH instruction.
+
+Verify:
+
+```bash
+issue-worker version
+```
+
+## 3. Initialize local configuration
+
+Run:
+
+```bash
+issue-worker init
+```
+
+On macOS the default file is:
+
+```text
+~/Library/Application Support/issue-worker/config.yml
+```
+
+Open it locally and replace the placeholder repository with the exact private repository/repositories authorized for this worker.
+
+Example:
+
+```yaml
+version: 1
+
+worker:
+  id: mac-mini
+  poll_interval: 30s
+  concurrency: 1
+
+repositories:
+  - owner/private-repo
+```
+
+Do not add an Organization wildcard. The MVP uses an explicit allowlist.
+
+## 4. Configure GitHub authentication
+
+The MVP supports a Fine-grained Personal Access Token.
+
+Guide the user in GitHub UI to create a token restricted to the selected private repositories, with repository permissions approximately:
+
+```text
+Contents       Read and write
+Issues         Read and write
+Pull requests  Read and write
+Metadata       Read-only (automatic)
+```
+
+Do not request Organization Administration or self-hosted runner Administration permissions.
+
+Do not ask the user to send the token to the LLM.
+
+Have the user enter it directly in the terminal:
+
+```bash
+issue-worker login
+```
+
+The input is hidden and stored in macOS Keychain as the issue-worker GitHub credential.
+
+## 5. Configure Codex separately
+
+Codex authentication is intentionally separate from GitHub authentication.
+
+Run under the same macOS account that will run issue-worker:
+
+```bash
+codex login
+```
+
+Never inspect, copy, print, or relocate Codex credential files.
+
+## 6. Run diagnostics
+
+Run:
+
+```bash
+issue-worker doctor
+```
+
+Expected checks include:
+
+```text
+[OK] git installed
+[OK] codex installed
+[OK] GitHub credential available
+[OK] repo access: owner/private-repo
+[OK] workspace writable
+[OK] daemon configuration
+```
+
+If a repository is public, the daemon MVP should reject it.
+
+If a check fails, fix that specific prerequisite rather than weakening sandbox/security settings.
+
+## 7. Optional repository configuration
+
+If the target project needs dependency preparation or worker-side validation, add `.issue-worker.yml` to the target repository.
+
+Example:
+
+```yaml
+base_branch: ""
+
+setup:
+  - npm ci
+
+verify:
+  - npm test
+  - npm run build
+```
+
+Security behavior:
+
+- the daemon reads and freezes `setup`/`verify` before Codex runs
+- Codex cannot change the commands used by the current job by editing `.issue-worker.yml`
+- these commands execute outside the Codex sandbox as the worker OS user
+
+Only configure commands appropriate for a trusted private repository.
+
+## 8. Test polling without a job
+
+Run one poll:
+
+```bash
+issue-worker poll
+```
+
+A successful no-job poll should exit cleanly.
+
+The daemon uses conditional GitHub requests with ETag/`If-None-Match`; repeated idle polls should normally become `304 Not Modified` responses internally.
+
+## 9. Start the worker in foreground
+
+Run:
+
+```bash
+issue-worker run
+```
+
+Leave it running while performing the smoke test.
+
+Do not create a GitHub Actions workflow for daemon mode.
+Do not register a self-hosted runner.
+Do not open an inbound port.
+
+## 10. End-to-end smoke test
+
+In one allowlisted private repository, create a harmless Issue such as:
+
+```text
+Title: issue-worker daemon smoke test
+
+Create ISSUE_WORKER_SMOKE_TEST.md containing one sentence that says the daemon is working. Do not modify unrelated files.
+```
+
+Apply:
+
+```text
+codex:ready
+```
+
+Expected transition:
+
+```text
+codex:ready
+  -> codex:running
+  -> Codex implementation
+  -> verification if configured
+  -> Pull Request
+  -> codex:review
+```
+
+Expected Git branch shape:
+
+```text
+issue-worker/<issue-number>-<run-id>
+```
+
+If Codex makes no changes, expect `codex:no-change`.
+If the worker fails after claiming the Issue, expect `codex:failed` and inspect the local worker log/terminal output.
+
+## 11. Important MVP limits
+
+Do not claim features that are not implemented yet:
+
+- no GitHub App login yet
+- no Homebrew package yet
+- no launchd service installer yet
+- no multi-worker distributed lock yet
+- no parallel jobs yet
+- no cancel label yet
+- no robust restart recovery yet
+
+The MVP's job claim is designed only for one daemon with `concurrency: 1`.
+
+## 12. Success criteria
+
+Setup is complete when all of the following are true:
+
+```text
+issue-worker runs locally
+configured private repo is accessible
+no self-hosted runner is registered
+no inbound port is open
+GitHub PAT remains outside repo/config/prompt
+Codex auth remains separate
+codex:ready is detected
+Codex edits a per-job worktree
+verification passes (if configured)
+branch is pushed
+PR is created
+Issue reaches codex:review
+```
