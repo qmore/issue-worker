@@ -4,7 +4,7 @@ This document is for an LLM / coding agent asked to configure `qmore/issue-worke
 
 ## Mission
 
-Configure a **private** GitHub repository so that a maintainer can apply `codex:run` to an Issue and have local Codex implement it on a caller-owned self-hosted runner, producing a branch and pull request.
+Configure a **private** GitHub repository so that a maintainer can apply `codex:run` to an Issue and have local Codex implement it on a caller-owned self-hosted runner, optionally prepare dependencies before Codex, verify the result before push/PR, and recover stale Issue state if the self-hosted runner disappears.
 
 ## Safety invariants
 
@@ -15,31 +15,35 @@ The setup agent must follow all of these:
 3. Use a private target repository by default.
 4. Do not use `--yolo`, `--dangerously-bypass-approvals-and-sandbox`, or `danger-full-access` as a setup shortcut.
 5. Trigger only from an explicit maintainer-applied label, not arbitrary Issue text.
-6. Keep caller workflow permissions to `contents: write`, `issues: write`, and `pull-requests: write` unless a separate requirement is justified.
-7. Configure a finite job timeout.
-8. Prefer a dedicated, unprivileged runner OS account without unrelated credentials.
-9. Do not silently install a package manager or alter Organization security policy.
-10. Stop at a pull request; do not enable automatic merge as part of setup.
+6. Keep the implementation job permissions to `contents: write`, `issues: write`, and `pull-requests: write` unless a separate requirement is justified.
+7. Keep the cleanup job at `issues: write` only.
+8. Configure a finite implementation timeout.
+9. Prefer a dedicated, unprivileged runner OS account without unrelated credentials.
+10. Do not silently enable Codex network access just because dependencies are missing; prefer trusted `setup-command` preparation first.
+11. Do not put literal secrets inside `setup-command` or `verify-command`.
 
-## Values to resolve
+## Values to establish
+
+Resolve these before editing the caller repository:
 
 ```text
-TARGET_REPO       = owner/repository
-RUNNER_SCOPE      = repository | organization
-RUNNER_LABEL      = codex
-BASE_BRANCH       = repository default unless explicitly specified
-RUNNER_OS         = macOS | Linux
-RUNNER_USER       = OS account used by GitHub Actions service
-ISSUE_WORKER_REF  = qmore/issue-worker@main for initial testing
+TARGET_REPO        = owner/repository
+RUNNER_SCOPE       = repository | organization
+RUNNER_LABEL       = codex
+BASE_BRANCH        = empty/default or explicit branch
+RUNNER_OS          = macOS | Linux
+ISSUE_WORKER_REF   = qmore/issue-worker@main during setup; pin for production
+SETUP_COMMAND      = empty or trusted dependency-preparation command
+VERIFY_COMMAND     = empty or trusted verification command
 ```
 
-Choose repository scope for one repo. Choose Organization scope when several repositories in the same Organization should share a runner pool.
+Choose repository scope for one private repository. Choose Organization scope when multiple repositories in one Organization should share a runner.
 
-`issue-worker` is a Composite Action. The caller repository owns `runs-on`; the public Action does not own or select the user's machine.
+Do not confuse runner scope with the location of `qmore/issue-worker`: `issue-worker` is a Composite Action and the caller repository owns `runs-on`.
 
-## Phase A — inspect first
+## Phase A — inspect the machine
 
-Run read-only checks:
+Run read-only checks first:
 
 ```bash
 uname -a
@@ -59,48 +63,25 @@ On macOS:
 xcode-select -p || true
 ```
 
-Do not install components that are already present.
+Do not install anything until missing prerequisites are known.
 
-## Phase B — install missing prerequisites
-
-Required runtime tools:
-
-```text
-git
-gh
-codex
-bash
-```
+## Phase B — install prerequisites
 
 ### macOS
 
-If Apple Command Line Tools are missing:
+If Xcode Command Line Tools are missing:
 
 ```bash
 xcode-select --install
 ```
 
-This may open a GUI installer; allow the human to complete it.
-
-If Homebrew already exists and `gh` is missing:
+If Homebrew is already approved and `gh` is missing:
 
 ```bash
 brew install gh
 ```
 
-Do not install Homebrew without user approval.
-
-Install Codex using the current official OpenAI installer:
-
-```bash
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
-
-### Linux
-
-Install Git and GitHub CLI through the user's approved package-management process, then install Codex using the current official OpenAI instructions.
-
-Verify:
+Install Codex using the current supported OpenAI installation path for the machine, then verify:
 
 ```bash
 git --version
@@ -108,9 +89,13 @@ gh --version
 codex --version
 ```
 
+### Linux
+
+Install `git` and `gh` through the user's approved package-management process, install Codex using the current supported OpenAI path, and verify all three commands.
+
 ## Phase C — verify Codex authentication
 
-Try a read-only non-interactive run under the intended runner account:
+First attempt a non-mutating non-interactive run:
 
 ```bash
 codex exec \
@@ -120,23 +105,13 @@ codex exec \
   "Reply with the single word OK."
 ```
 
-If sign-in is required, launch:
+If authentication is missing, have the human complete the supported Codex sign-in flow under the same OS account that will run the GitHub Actions service.
 
-```bash
-codex
-```
-
-and let the human complete the supported authentication flow.
-
-Do not print or inspect credential contents. If checking a file-backed auth cache is necessary, inspect only metadata such as existence/permissions.
-
-For trusted persistent CI authentication, follow current OpenAI guidance:
-
-https://developers.openai.com/codex/auth/ci-cd-auth
+Never print or read Codex auth secrets into model context. If only file presence/permissions need inspection, inspect metadata only.
 
 ## Phase D — register the self-hosted runner
 
-### Repository-level
+### Repository scope
 
 Human navigation:
 
@@ -144,7 +119,7 @@ Human navigation:
 TARGET_REPO -> Settings -> Actions -> Runners -> New self-hosted runner
 ```
 
-### Organization-level
+### Organization scope
 
 Human navigation:
 
@@ -152,19 +127,21 @@ Human navigation:
 Organization -> Settings -> Actions -> Runners -> New runner
 ```
 
-GitHub generates platform-specific commands containing a short-lived registration credential. Use the commands GitHub generated on the runner; never copy that credential into repository files or a chat summary.
+Use GitHub's generated platform commands and short-lived registration token exactly as provided. Never copy that token into repository files or chat summaries.
 
-Recommended custom runner label:
+Recommended custom label:
 
 ```text
 codex
 ```
 
-Acceptance condition: GitHub shows the runner Online/Idle or its console shows it is listening for jobs.
+Acceptance check: GitHub shows the runner online/idle or the local runner reports that it is listening for jobs.
 
-## Phase E — enable unattended runner service
+## Phase E — service startup
 
-After registration, from the Actions runner installation directory on macOS:
+Configure the GitHub runner to start unattended according to GitHub's current platform instructions.
+
+On macOS, from the runner directory, this is commonly:
 
 ```bash
 ./svc.sh install
@@ -172,25 +149,68 @@ After registration, from the Actions runner installation directory on macOS:
 ./svc.sh status
 ```
 
-Use GitHub's current platform instructions on Linux.
+Verify the service uses the intended HOME/PATH and can see the same Codex installation/authentication as the interactive account.
 
-Verify the service runs as `RUNNER_USER` and that its `HOME` and `PATH` can find the same Codex installation/authentication verified in Phase C.
+## Phase F — allow PR creation
 
-## Phase F — verify GitHub Actions PR policy
-
-`issue-worker` creates a pull request after implementation. Check the target repository:
+In the private target repository, check:
 
 ```text
 Settings -> Actions -> General -> Workflow permissions
 ```
 
-The repository/Organization policy must allow GitHub Actions to create pull requests when the default `${{ github.token }}` is used.
+Enable GitHub Actions PR creation if repository/Organization policy permits it.
 
-Do not weaken a higher-level Organization policy without explicit administrator approval.
+If Organization policy forbids this, do not bypass policy. Use the organization's approved GitHub App/PAT approach if one exists.
 
-## Phase G — add the caller workflow
+## Phase G — choose setup and verification
 
-Create in the **private target repository**:
+### `setup-command`
+
+Use when dependencies must exist before Codex starts, especially when Codex network access should remain disabled.
+
+Examples:
+
+```yaml
+setup-command: |
+  composer install --prefer-dist --no-interaction --no-progress
+  npm ci
+```
+
+Rules:
+
+- trusted workflow configuration only
+- runs outside Codex sandbox
+- failure prevents Codex from starting
+- do not embed literal credentials
+- prefer package-manager caches already available on the self-hosted runner
+
+Do not make `issue-worker` framework-specific. Laravel/npm/Composer/etc. remain caller concerns.
+
+### `verify-command`
+
+Use when the wrapper must prove the generated workspace passes deterministic checks before commit/push/PR.
+
+Example:
+
+```yaml
+verify-command: |
+  php artisan test
+  npm run build
+```
+
+Rules:
+
+- runs after Codex and before commit/push/PR
+- failure must stop the run
+- command output stays in Actions logs
+- the PR only gets command text, pass/skip result, and Actions run URL
+
+Because Codex may modify project scripts, only run verification commands in trusted private repositories where executing modified project code under the runner account is acceptable.
+
+## Phase H — add the caller workflow
+
+Create:
 
 ```text
 .github/workflows/issue-worker.yml
@@ -226,33 +246,44 @@ jobs:
         with:
           github-token: ${{ github.token }}
           issue-number: ${{ github.event.issue.number }}
+
+          # Add only when needed:
+          # setup-command: './scripts/bootstrap-deps.sh'
+          # verify-command: './scripts/verify.sh'
+
+  cleanup-state:
+    needs: implement
+    if: always() && github.event.label.name == 'codex:run'
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Recover stale issue-worker state
+        uses: qmore/issue-worker/cleanup@main
+        with:
+          github-token: ${{ github.token }}
+          issue-number: ${{ github.event.issue.number }}
+          job-result: ${{ needs.implement.result }}
 ```
 
-If the project explicitly uses a non-default base branch, add for example:
+Use the same ref for both Actions. Pin a release tag or full commit SHA for production.
 
-```yaml
-          base-branch: develop
-```
+Why cleanup is separate:
 
-Do not add `secrets: inherit` or unrelated secrets.
+- a shell trap cannot run if the self-hosted process/machine disappears
+- the cleanup job runs on GitHub-hosted infrastructure
+- `codex:review` and `codex:no-change` are terminal and must never be overwritten
+- `failure`/`cancelled` plus stale `codex:working` becomes `codex:failed`
 
-For production, pin `issue-worker` to a release tag or full commit SHA rather than `@main`.
+A platform-level force-cancel that prevents all remaining jobs from starting cannot be repaired by a later job in the same workflow.
 
-### Generated PR CI behavior
+## Phase I — project instructions
 
-With the repository `${{ github.token }}`, GitHub intentionally limits recursive workflow execution. A PR created by the worker can have `pull_request` CI in an approval-required state, and pushes made with that token do not trigger normal `push` workflows.
+Inspect `AGENTS.md` before creating or changing it.
 
-This is acceptable for the default human-review workflow. If fully automatic downstream CI is a requirement, follow GitHub's current guidance for a GitHub App installation token or other approved credential. Do not improvise a long-lived credential in workflow YAML.
-
-Reference:
-
-https://docs.github.com/actions/concepts/security/github_token
-
-## Phase H — add project instructions
-
-Inspect `AGENTS.md` in the target repo.
-
-If it exists, preserve it and modify only when necessary. If the repository has durable non-obvious rules and no `AGENTS.md`, create a concise one, for example:
+Use it for durable rules only, for example:
 
 ```markdown
 # AGENTS.md
@@ -263,17 +294,17 @@ If it exists, preserve it and modify only when necessary. If the repository has 
 - Keep changes scoped to the Issue.
 ```
 
-Never put credentials or machine-specific secrets in `AGENTS.md`.
+Do not place credentials or machine-local secrets in `AGENTS.md`.
 
-## Phase I — trigger label
+## Phase J — labels
 
-Ensure this label exists:
+Ensure this trigger exists:
 
 ```text
 codex:run
 ```
 
-The Action will attempt to manage these state labels:
+The Action manages these state labels when permitted:
 
 ```text
 codex:working
@@ -282,7 +313,7 @@ codex:failed
 codex:no-change
 ```
 
-## Phase J — smoke test
+## Phase K — smoke test
 
 Create a harmless Issue:
 
@@ -292,107 +323,78 @@ Title: issue-worker smoke test
 Create ISSUE_WORKER_SMOKE_TEST.md with one sentence stating that issue-worker is configured correctly. Do not modify any other files.
 ```
 
-A human with write access applies `codex:run`.
+Have a human with write-level access apply `codex:run`.
 
-Expected flow:
+Expected successful path:
 
 ```text
-Issue + codex:run
-  -> Actions run
-  -> self-hosted runner
+Issue codex:run
+  -> self-hosted runner receives job
+  -> optional setup-command passes
   -> codex:working
   -> Codex edits workspace
-  -> branch + commit + push
-  -> pull request
+  -> optional verify-command passes
+  -> generated branch is pushed
+  -> pull request opens
+  -> PR shows Verification section
   -> codex:review
 ```
 
-Review the generated PR manually. Do not auto-merge the smoke test.
+Do not auto-merge the smoke test.
+
+## Recovery test
+
+After the normal smoke test works, optionally test cleanup with a disposable Issue/workflow run:
+
+1. Start a harmless worker job.
+2. After `codex:working` appears, cancel the implementation job normally from GitHub.
+3. Confirm the GitHub-hosted `cleanup-state` job runs.
+4. Confirm `codex:working` is removed and `codex:failed` is applied.
+
+Do not simulate recovery by killing unrelated production processes or powering off a shared machine.
 
 ## Failure decision tree
 
-### Job remains queued
+### Workflow queued
 
-Check:
+Check runner online state, scope/group visibility, runner labels, and whether the only runner is busy.
 
-1. runner is online
-2. caller repository can access its repository/Organization runner scope
-3. runner has every label in `runs-on`
-4. another job is not occupying the only runner
+### `codex` missing only in Actions
 
-Do not switch to a GitHub-hosted runner merely to clear the queue; local execution is the point of this package.
+The service PATH differs from the interactive shell. Check `whoami`, `HOME`, `PATH`, and `command -v codex` in the service context.
 
-### `codex` works in Terminal but not Actions
+### Codex auth works interactively but not as a service
 
-Compare the interactive account and runner service context:
+Check service user, HOME, keychain/file-backed credential availability, and `CODEX_HOME`. Do not dump credential contents.
 
-```bash
-whoami
-printf '%s\n' "$HOME"
-printf '%s\n' "$PATH"
-command -v codex
-```
+### setup fails
 
-Likely causes are different user, HOME, PATH, keychain availability, or `CODEX_HOME`.
+Read the setup step Actions log. Do not enable Codex network access as the first fix. Prefer deterministic runner/package-manager preparation.
 
-### Worker rejects the actor
+### verification fails
 
-The user applying `codex:run` must have write-level repository access. Do not disable this check as the first fix.
+The worker should stop before commit/push/PR and mark the Issue failed. Fix the generated code or verification environment; do not bypass the check merely to get a PR.
 
-### PR creation is denied
+### `codex:working` remains after cancellation
 
-Check the Actions workflow-permissions setting from Phase F and any inherited Organization policy.
+Check that the caller workflow contains the GitHub-hosted `cleanup-state` job, uses `if: always()`, and gives it `issues: write`.
 
-### Generated PR CI requires approval
+### PR creation denied
 
-That is expected with the repository `GITHUB_TOKEN`. A user with write access can approve the workflow. Only change authentication if unattended downstream CI is an explicit requirement.
+Check repository/Organization Actions workflow permissions.
 
-### Codex cannot access dependencies
+## Completion criteria
 
-Network is disabled in the workspace-write sandbox by default. Prefer preinstalled/cached dependencies. If the trusted project genuinely needs outbound network, the caller can explicitly set:
-
-```yaml
-          allow-network: 'true'
-```
-
-Document why this is required.
-
-### Deterministic post-check is needed
-
-Prefer normal verification instructions in `AGENTS.md`. The optional caller input:
-
-```yaml
-          verify-command: './scripts/verify.sh'
-```
-
-runs after Codex **outside** the Codex sandbox. Because Codex may have modified repository scripts, use this only in a trusted private repository and under a dedicated unprivileged runner account.
-
-## Completion checklist
-
-Do not declare setup complete until all are true:
+Setup is complete only when all are true:
 
 - [ ] target repository is private
-- [ ] runner is online and visible to the caller repo
-- [ ] runner labels match `runs-on`
-- [ ] runner service uses the intended OS account
-- [ ] Git/gh/Codex are visible in the service PATH
-- [ ] non-interactive Codex auth works under that account
-- [ ] Actions policy permits the worker to create a PR
-- [ ] caller workflow exists with minimal permissions and finite timeout
+- [ ] self-hosted runner is online and visible to the caller
+- [ ] runner has the selected label(s)
+- [ ] Codex works non-interactively under the runner service account
+- [ ] caller workflow has finite timeout and minimal permissions
 - [ ] `codex:run` exists
-- [ ] smoke-test Issue reaches `codex:review`
-- [ ] generated PR is reviewed by a human
-- [ ] no credential was copied into repo content, Issues, logs, artifacts, or model-visible notes
-
-## Canonical references
-
-When upstream behavior differs, follow current official documentation:
-
-- OpenAI Codex CLI: https://developers.openai.com/codex/cli
-- OpenAI non-interactive mode: https://developers.openai.com/codex/non-interactive-mode
-- OpenAI approvals/security: https://developers.openai.com/codex/agent-approvals-security
-- OpenAI trusted CI/CD auth: https://developers.openai.com/codex/auth/ci-cd-auth
-- GitHub self-hosted runners: https://docs.github.com/actions/how-tos/manage-runners/self-hosted-runners/add-runners
-- GitHub runner service: https://docs.github.com/actions/how-tos/manage-runners/self-hosted-runners/configure-the-application
-- GitHub `GITHUB_TOKEN`: https://docs.github.com/actions/concepts/security/github_token
-- GitHub Actions repository settings: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository
+- [ ] optional setup/verification commands are explicitly chosen and trusted
+- [ ] cleanup job exists on GitHub-hosted infrastructure
+- [ ] smoke test reaches `codex:review`
+- [ ] generated PR shows verification state
+- [ ] no credentials were copied into repo/Issue/log/model-visible documentation
