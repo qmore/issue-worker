@@ -1,0 +1,45 @@
+name: Issue Worker Cleanup
+description: Recover issue-worker state after a failed or cancelled implementation job.
+author: qmore
+
+inputs:
+  github-token:
+    description: Caller repository GITHUB_TOKEN. Requires issues write permission.
+    required: true
+  issue-number:
+    description: GitHub Issue number associated with the implementation job.
+    required: true
+  job-result:
+    description: Result of the implementation job, normally needs.implement.result.
+    required: true
+  working-label:
+    description: Label used while issue-worker is active.
+    required: false
+    default: codex:working
+  review-label:
+    description: Terminal label used when a PR was created.
+    required: false
+    default: codex:review
+  failed-label:
+    description: Label applied when an abnormal run is recovered.
+    required: false
+    default: codex:failed
+  no-change-label:
+    description: Terminal label used when no repository changes were produced.
+    required: false
+    default: codex:no-change
+
+runs:
+  using: composite
+  steps:
+    - name: Recover issue-worker state
+      shell: bash
+      env:
+        ISSUE_WORKER_GITHUB_TOKEN: ${{ inputs.github-token }}
+        ISSUE_WORKER_ISSUE_NUMBER: ${{ inputs.issue-number }}
+        ISSUE_WORKER_JOB_RESULT: ${{ inputs.job-result }}
+        ISSUE_WORKER_WORKING_LABEL: ${{ inputs.working-label }}
+        ISSUE_WORKER_REVIEW_LABEL: ${{ inputs.review-label }}
+        ISSUE_WORKER_FAILED_LABEL: ${{ inputs.failed-label }}
+        ISSUE_WORKER_NO_CHANGE_LABEL: ${{ inputs.no-change-label }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/cleanup-state.sh"
