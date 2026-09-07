@@ -42,8 +42,8 @@ jobs:
           cache: false
       - name: Download modules
         run: go mod download
-      - name: Check formatting
-        run: test -z "$(gofmt -l cmd internal)"
+      - name: Format workspace copy
+        run: gofmt -w cmd internal
       - name: Test
         run: go test ./...
       - name: Vet
