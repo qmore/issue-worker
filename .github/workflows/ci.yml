@@ -44,21 +44,8 @@ jobs:
         run: go mod download
       - name: Check module files
         run: go mod tidy && git diff --exit-code -- go.mod go.sum
-      - name: Prepare formatting diagnostics
-        shell: bash
-        run: |
-          gofmt -l cmd internal > gofmt-files.txt
-          gofmt -w cmd internal
-      - name: Upload formatting diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: gofmt-${{ matrix.os }}
-          path: |
-            gofmt-files.txt
-            cmd/**/*.go
-            internal/**/*.go
       - name: Check formatting
-        run: test ! -s gofmt-files.txt
+        run: test -z "$(gofmt -l cmd internal)"
       - name: Test
         run: go test ./...
       - name: Vet
