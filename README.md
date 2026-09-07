@@ -269,16 +269,15 @@ LLM-oriented installation guide: [`docs/LLM_DAEMON_SETUP.md`](docs/LLM_DAEMON_SE
 
 ## Releases
 
-Pushing a version tag such as:
+`VERSION` is the release source of truth. To publish a new version, update `VERSION` in a normal pull request, for example:
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
+```text
+v0.1.1
 ```
 
-runs `.github/workflows/release.yml`. GitHub Actions cross-compiles the four supported targets, embeds the tag into `issue-worker version`, creates `SHA256SUMS`, verifies the Linux release binary and checksums, then publishes the archives as a GitHub Release.
+When that change reaches `main`, `.github/workflows/release.yml` automatically cross-compiles the four supported targets, embeds the version into `issue-worker version`, creates `SHA256SUMS`, verifies the release output, creates the Git tag and GitHub Release, and uploads the archives.
 
-The Go toolchain therefore exists only in development/CI, not on worker machines.
+The Go toolchain therefore exists only in development/CI, not on worker machines. See [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Existing GitHub Actions mode
 
