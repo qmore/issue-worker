@@ -277,4 +277,4 @@ The Action is the same in both cases. Only `runs-on` and the GitHub runner regis
 
 ## License
 
-No open-source license has been selected yet. Add a license before treating this repository as a distributable open-source package.
+MIT License. See [LICENSE](LICENSE).
