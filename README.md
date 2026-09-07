@@ -78,8 +78,8 @@ Linux x86_64
 To install a specific release rather than the latest:
 
 ```bash
-ISSUE_WORKER_VERSION=v0.1.0 \
-  curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh \
+  | ISSUE_WORKER_VERSION=v0.1.0 sh
 ```
 
 Runtime requirements on the worker are only:
