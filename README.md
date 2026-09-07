@@ -1,307 +1,278 @@
 # issue-worker
 
-Turn a trusted GitHub Issue into a local Codex implementation job on your own self-hosted runner.
+Turn a trusted GitHub Issue into a local Codex implementation job and return the result as a Pull Request.
 
-`issue-worker` is a reusable GitHub Composite Action for trusted private repositories. A maintainer adds `codex:run` to an Issue, GitHub Actions routes the job to a self-hosted runner, and the local Codex CLI implements the Issue. The wrapper verifies the result, creates a branch, pushes it, and opens a pull request for human review.
+> **Status:** experimental. The new standalone daemon is the preferred prototype path and is currently being validated. The existing GitHub Actions / self-hosted runner mode remains in this repository as an alternative implementation.
 
-> **Status:** early v0.x / experimental. Review every generated pull request before merging.
+## Standalone daemon
 
-## Flow
-
-```text
-GitHub Issue
-   |
-   | add codex:run
-   v
-GitHub Actions
-   |
-   v
-self-hosted runner
-   |
-   +--> setup-command       (trusted, outside Codex sandbox)
-   |
-   +--> Codex CLI           (workspace-write sandbox)
-   |
-   +--> verify-command      (trusted, outside Codex sandbox)
-   |
-   v
-branch -> commit -> push -> Pull Request
-   |
-   v
-codex:review
-```
-
-If the self-hosted runner disappears after `codex:working` is applied, an optional GitHub-hosted cleanup job can recover the Issue to `codex:failed`.
-
-## Why this exists
-
-Codex Cloud is useful when a project can run in a cloud environment. Some projects cannot: embedded toolchains, licensed SDKs, local hardware, private networks, large caches, or development environments already installed on a workstation/build machine.
-
-`issue-worker` keeps the implementation environment local while using GitHub Issues and Pull Requests as the job queue and review surface.
-
-## Design boundaries
+The daemon reverses the original GitHub Actions model: **GitHub does not invoke your Mac. `issue-worker` polls GitHub and uses Issues as a lightweight job store.**
 
 ```text
-GitHub Issue       = WHAT to implement
-AGENTS.md          = HOW code should be written
-caller workflow    = WHEN / WHERE execution is allowed
-issue-worker       = orchestration
-self-hosted runner = actual development environment
+GitHub private repository
+        |
+        | Issue + codex:ready
+        | outbound HTTPS polling
+        v
+issue-worker daemon on your Mac
+        |
+        +-- trusted setup
+        +-- Codex CLI
+        +-- trusted verification
+        +-- commit / push
+        v
+Pull Request + Issue status
 ```
 
-Because the package is a Composite Action, `runs-on` stays in the caller repository. The same Action works with either:
+No GitHub self-hosted runner registration is required. No inbound port, webhook endpoint, `gh` CLI, or repository Actions workflow is required for daemon mode.
 
-- a repository-level self-hosted runner
-- an Organization-level self-hosted runner shared by multiple repositories
+### MVP scope
 
-## Requirements
+The current prototype intentionally stays small:
 
-On the self-hosted runner:
+- macOS-first
+- Go single binary
+- explicit private-repository allowlist
+- Fine-grained PAT stored in macOS Keychain
+- 30-second polling by default
+- ETag / `If-None-Match` conditional requests
+- one daemon / one concurrent job
+- persistent repository mirrors + per-job Git worktrees
+- unique branch for every execution
+- optional trusted setup before Codex
+- Codex `workspace-write` sandbox with minimized environment
+- optional trusted verification after Codex
+- wrapper-owned commit, push, PR, labels, and Issue comments
 
-- Git
-- GitHub CLI (`gh`)
-- Codex CLI
-- working Codex authentication
-- the project build/test toolchain
+Multi-worker distributed locking, GitHub App login, launchd installation, Homebrew packaging, cancellation, and restart recovery are intentionally deferred until the basic flow has been exercised end-to-end.
 
-The implementation job needs:
+## Prototype installation
 
-```yaml
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+Until release binaries/Homebrew packaging exist:
+
+```bash
+git clone https://github.com/qmore/issue-worker.git
+cd issue-worker
+git switch feat/daemon-mvp
+./scripts/install-daemon.sh
 ```
 
-The optional cleanup job only needs:
-
-```yaml
-permissions:
-  issues: write
-```
-
-## Quick start
-
-### 1. Prepare the runner
-
-Install Git/`gh`/Codex and authenticate Codex under the OS account that runs the GitHub Actions runner.
-
-Register the machine as a repository-level or Organization-level self-hosted runner and give it a label such as:
+Runtime requirements:
 
 ```text
+git
 codex
 ```
 
-See [docs/SETUP.md](docs/SETUP.md) and [docs/LLM_SETUP.md](docs/LLM_SETUP.md).
+Go is currently required only to build the prototype installer. It will not be a runtime dependency once release binaries are published.
 
-### 2. Add the caller workflow
+### 1. Initialize
 
-Create `.github/workflows/issue-worker.yml` in the private target repository:
+```bash
+issue-worker init
+```
+
+On macOS this creates:
+
+```text
+~/Library/Application Support/issue-worker/config.yml
+```
+
+Edit the explicit repository allowlist:
 
 ```yaml
-name: Issue Worker
+version: 1
 
-on:
-  issues:
-    types: [labeled]
+worker:
+  id: mac-mini
+  poll_interval: 30s
+  concurrency: 1
 
-concurrency:
-  group: issue-worker-${{ github.repository }}
-  cancel-in-progress: false
-
-jobs:
-  implement:
-    if: github.event.label.name == 'codex:run'
-    runs-on: [self-hosted, codex]
-    timeout-minutes: 60
-
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-
-    steps:
-      - name: Implement Issue with local Codex
-        uses: qmore/issue-worker@main
-        with:
-          github-token: ${{ github.token }}
-          issue-number: ${{ github.event.issue.number }}
-
-          # Optional trusted preparation before Codex:
-          # setup-command: |
-          #   composer install --prefer-dist --no-interaction --no-progress
-          #   npm ci
-
-          # Optional trusted verification after Codex:
-          # verify-command: |
-          #   php artisan test
-          #   npm run build
-
-  cleanup-state:
-    needs: implement
-    if: always() && github.event.label.name == 'codex:run'
-    runs-on: ubuntu-latest
-
-    permissions:
-      issues: write
-
-    steps:
-      - name: Recover stale issue-worker state
-        uses: qmore/issue-worker/cleanup@main
-        with:
-          github-token: ${{ github.token }}
-          issue-number: ${{ github.event.issue.number }}
-          job-result: ${{ needs.implement.result }}
+repositories:
+  - owner/private-repository
 ```
 
-For production use, pin **both** `uses:` entries to the same release tag or full commit SHA instead of `@main`.
+See [`examples/daemon-config.yml`](examples/daemon-config.yml).
 
-### 3. Trigger a job
+### 2. GitHub login
 
-Create an Issue with a concrete implementation request and add:
+Create a Fine-grained PAT limited to the selected private repositories. Recommended repository permissions for the MVP:
 
 ```text
-codex:run
+Contents       Read and write
+Issues         Read and write
+Pull requests  Read and write
+Metadata       Read-only (automatic)
 ```
 
-Typical state transition:
+Then enter it directly in the local terminal:
+
+```bash
+issue-worker login
+```
+
+The input is hidden and stored in macOS Keychain. The token is not stored in `config.yml` and is not passed to Codex.
+
+### 3. Codex login
+
+Codex authentication stays separate:
+
+```bash
+codex login
+```
+
+`issue-worker` does not manage the Codex credential itself.
+
+### 4. Diagnose
+
+```bash
+issue-worker doctor
+```
+
+This validates the local tools, GitHub credential, configured private repositories, workspace, and configuration.
+
+### 5. Start
+
+Foreground mode:
+
+```bash
+issue-worker run
+```
+
+Single diagnostic poll:
+
+```bash
+issue-worker poll
+```
+
+The prototype intentionally does not install a background service yet.
+
+## Submit a job
+
+Create an Issue in an allowlisted private repository and apply:
 
 ```text
-codex:run
-   -> codex:working
+codex:ready
+```
+
+Typical flow:
+
+```text
+codex:ready
+   -> codex:running
+   -> setup
+   -> Codex
+   -> verification
+   -> branch / commit / push
+   -> Pull Request
    -> codex:review
 ```
 
-Failure/no-change paths:
+Failure/no-change states:
 
 ```text
 codex:failed
 codex:no-change
 ```
 
-## `setup-command`
-
-`setup-command` runs after checkout and before Codex, outside the Codex sandbox.
-
-Use it to prepare trusted dependencies without enabling Codex network access:
-
-```yaml
-setup-command: |
-  composer install --prefer-dist --no-interaction --no-progress
-  npm ci
-```
-
-Properties:
-
-- optional; empty preserves the original behavior
-- failure prevents Codex from starting
-- failure marks the Issue `codex:failed`
-- command text is not mixed into the Codex prompt
-- the issue-worker GitHub token is not exported to the setup child process
-
-Package-manager-specific logic and caches intentionally stay in the caller workflow/runner.
-
-## Verification
-
-`verify-command` runs after Codex and before commit/push/PR:
-
-```yaml
-verify-command: |
-  php artisan test
-  npm run build
-```
-
-If verification fails, the worker does **not** commit, push, or create a PR.
-
-Successful PRs receive a concise section like:
-
-```markdown
-## Verification
-
-- ✅ Result: **Passed**
-- Command:
-
-    php artisan test
-    npm run build
-
-- Actions run: ...
-```
-
-Only command text, result, and Actions run URL are added to the PR; verification stdout/stderr remains in the Actions log.
-
-The Action exposes:
+Each execution gets a new branch similar to:
 
 ```text
-verification-result = passed | skipped
+issue-worker/123-20260907T150000000000000Z
 ```
 
-## Abnormal termination recovery
+## Repository-local configuration
 
-Shell traps cannot run after a hard runner/process failure. The separate `qmore/issue-worker/cleanup` Action is intended to run from a GitHub-hosted cleanup job using `if: always()`.
+Projects can optionally commit `.issue-worker.yml`:
 
-It follows these rules:
+```yaml
+base_branch: ""
+
+setup:
+  - npm ci
+
+verify:
+  - npm test
+  - npm run build
+```
+
+See [`examples/repository.issue-worker.yml`](examples/repository.issue-worker.yml).
+
+`setup` and `verify` are copied into worker memory **before Codex starts**. If Codex edits `.issue-worker.yml`, that does not change the host-side commands for the current job.
+
+Both command groups run outside the Codex sandbox under the worker OS account, so use them only for trusted private repositories.
+
+## Polling
+
+Default interval:
 
 ```text
-codex:review / codex:no-change
-  -> terminal; never overwrite
-
-failure/cancelled + codex:working
-  -> remove codex:working
-  -> add codex:failed
-  -> comment with Actions run URL
+30s
 ```
 
-This covers normal job failure/cancellation/offline-runner recovery once GitHub schedules the cleanup job. A platform-level force-cancel that prevents all remaining jobs from starting cannot be repaired by a later job in the same workflow.
+For each repository, the daemon remembers the response ETag and sends `If-None-Match` on later requests. The normal idle path is therefore:
+
+```text
+poll -> 304 Not Modified -> sleep -> poll
+```
+
+ETag support is part of the MVP rather than a later optimization.
 
 ## Security model
 
-This project targets **trusted private repositories**.
+The standalone MVP targets **trusted private repositories**.
 
 Important invariants:
 
-- Issue content is treated as untrusted prompt input
-- the trigger actor must have write-level repository access
-- checkout credentials are not persisted
-- the wrapper GitHub token is not passed to Codex
-- Codex starts with a minimized environment via `env -i`
-- Codex uses `workspace-write`
-- unattended approval mode is non-interactive
-- Codex does not commit, push, or create PRs
-- wrapper Git operations restore/protect local Git configuration
+- only repositories explicitly listed in local configuration are considered
+- public target repositories are rejected by the MVP
+- the explicit `codex:ready` label is the approval boundary
+- the GitHub credential belongs to the wrapper, not the Codex process
+- the PAT is not put into repository files or prompts
+- Codex receives a minimized environment
+- Codex uses `workspace-write` and non-interactive approval mode
+- Codex is told not to commit, push, create PRs, or operate GitHub
 - automated commits disable Git hooks
-- each run gets a new branch
-- human PR review remains the default boundary
+- each execution uses a separate worktree and branch
+- human Pull Request review remains the final boundary
 
-Read [docs/SECURITY.md](docs/SECURITY.md) before enabling the worker.
+Do not run multiple daemon instances against the same repository yet. The MVP claim mechanism is not a distributed atomic lock.
 
-## Inputs
+Detailed prototype design: [`docs/DAEMON_MVP.md`](docs/DAEMON_MVP.md)
 
-| Input | Required | Default | Description |
-| --- | --- | --- | --- |
-| `github-token` | yes | - | Caller repository `GITHUB_TOKEN`. |
-| `issue-number` | yes | - | Issue number to implement. |
-| `base-branch` | no | repository default | PR base branch. |
-| `trigger-label` | no | `codex:run` | Explicit execution trigger. |
-| `working-label` | no | `codex:working` | Active state. |
-| `review-label` | no | `codex:review` | PR-created state. |
-| `failed-label` | no | `codex:failed` | Failure state. |
-| `no-change-label` | no | `codex:no-change` | Successful no-change state. |
-| `branch-prefix` | no | `codex/issue-` | Generated branch prefix. |
-| `setup-command` | no | empty | Trusted dependency/setup command before Codex. |
-| `verify-command` | no | empty | Trusted verification before commit/push/PR. |
-| `codex-model` | no | empty | Optional model override. |
-| `codex-effort` | no | empty | Optional reasoning-effort override. |
-| `allow-network` | no | `false` | Codex sandbox network access. |
+LLM-oriented installation guide: [`docs/LLM_DAEMON_SETUP.md`](docs/LLM_DAEMON_SETUP.md)
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
+## Existing GitHub Actions mode
 
-## Documentation
+The original Composite Action implementation is still available while the standalone daemon is validated. It uses:
 
-- [Setup guide](docs/SETUP.md)
-- [LLM setup guide](docs/LLM_SETUP.md)
-- [Configuration reference](docs/CONFIGURATION.md)
-- [Security model](docs/SECURITY.md)
-- [Example caller workflow](examples/issue-worker.yml)
+```text
+Issue -> GitHub Actions -> self-hosted runner -> Codex -> PR
+```
+
+It supports repository-level and Organization-level self-hosted runners, trusted `setup-command`, worker-side verification, and a separate cleanup Action for stale state recovery.
+
+Existing-mode documentation:
+
+- [`docs/SETUP.md`](docs/SETUP.md)
+- [`docs/LLM_SETUP.md`](docs/LLM_SETUP.md)
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
+- [`docs/SECURITY.md`](docs/SECURITY.md)
+- [`examples/issue-worker.yml`](examples/issue-worker.yml)
+
+The goal of the daemon experiment is specifically to remove the installation overhead of runner registration and caller workflows, not to delete the working Actions implementation before the new path is proven.
+
+## Development
+
+The daemon is written in Go.
+
+```bash
+go test ./...
+go vet ./...
+go build ./cmd/issue-worker
+```
+
+CI runs these checks on both macOS and Linux in addition to the existing Composite Action tests.
 
 ## License
 
