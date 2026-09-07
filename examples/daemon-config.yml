@@ -1,0 +1,29 @@
+version: 1
+
+worker:
+  id: mac-mini
+  poll_interval: 30s
+  concurrency: 1
+
+github:
+  api_url: https://api.github.com
+
+# Explicit allowlist. The MVP does not enumerate whole Organizations.
+repositories:
+  - your-name/private-repository
+
+labels:
+  ready: codex:ready
+  running: codex:running
+  review: codex:review
+  failed: codex:failed
+  no_change: codex:no-change
+
+# Empty uses ~/Library/Application Support/issue-worker/data on macOS.
+workspace:
+  root: ""
+
+codex:
+  model: ""
+  effort: ""
+  allow_network: false
