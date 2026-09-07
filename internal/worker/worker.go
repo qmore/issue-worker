@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -28,11 +26,23 @@ type Worker struct {
 	log   *log.Logger
 }
 
+type verifyResult struct {
+	Command  string
+	Passed   bool
+	Duration time.Duration
+}
+
 func New(cfg *config.Config, client *gh.Client, token string, logger *log.Logger) *Worker {
 	if logger == nil {
 		logger = log.New(os.Stdout, "", log.LstdFlags)
 	}
-	return &Worker{cfg: cfg, gh: client, token: token, etags: map[string]string{}, log: logger}
+	return &Worker{
+		cfg:   cfg,
+		gh:    client,
+		token: token,
+		etags: map[string]string{},
+		log:   logger,
+	}
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -40,6 +50,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err := w.PollOnce(ctx); err != nil {
 		w.log.Printf("initial poll: %v", err)
 	}
+
 	ticker := time.NewTicker(w.cfg.Worker.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -70,7 +81,8 @@ func (w *Worker) PollOnce(ctx context.Context) error {
 			if err := w.process(ctx, repo, issue); err != nil {
 				w.log.Printf("%s#%d failed: %v", repo, issue.Number, err)
 			}
-			// MVP is deliberately single-job/single-worker. Re-poll after each job.
+			// The MVP is deliberately one job at a time. Re-poll after a job so
+			// remote state is refreshed instead of consuming a stale issue list.
 			return nil
 		}
 	}
@@ -99,13 +111,17 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	if err != nil {
 		return err
 	}
+	if !repository.Private {
+		return errors.New("daemon MVP refuses public target repositories")
+	}
 	base := repository.DefaultBranch
 	if base == "" {
 		return errors.New("repository default branch is empty")
 	}
 
 	runID := time.Now().UTC().Format("20060102T150405.000000000Z")
-	branch := fmt.Sprintf("issue-worker/%d-%s", issue.Number, strings.ReplaceAll(runID, ".", ""))
+	branchRunID := strings.ReplaceAll(runID, ".", "")
+	branch := fmt.Sprintf("issue-worker/%d-%s", issue.Number, branchRunID)
 	jobDir, err := w.prepareWorktree(ctx, repo, base, branch, issue.Number, runID)
 	if err != nil {
 		return err
@@ -118,8 +134,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 		return fmt.Errorf("load .issue-worker.yml: %w", err)
 	}
 	if repoCfg.BaseBranch != "" && repoCfg.BaseBranch != base {
-		// Reload on the configured base branch before any trusted project command runs.
-		if err := w.resetWorktreeBase(ctx, repo, jobDir, branch, repoCfg.BaseBranch); err != nil {
+		if err := w.resetWorktreeBase(ctx, repo, jobDir, repoCfg.BaseBranch); err != nil {
 			return err
 		}
 		base = repoCfg.BaseBranch
@@ -128,7 +143,8 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 			return fmt.Errorf("reload .issue-worker.yml: %w", err)
 		}
 	}
-	// Freeze setup/verify before Codex can edit repository configuration.
+
+	// Freeze trusted host-side commands before Codex is allowed to edit the tree.
 	setupCommands := append([]string(nil), repoCfg.Setup...)
 	verifyCommands := append([]string(nil), repoCfg.Verify...)
 
@@ -140,7 +156,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	}
 
 	stage = "codex"
-	lastMessage, err := w.runCodex(ctx, jobDir, repo, issue)
+	lastMessage, err := w.runCodex(ctx, jobDir, branch, repo, issue)
 	if err != nil {
 		return err
 	}
@@ -150,7 +166,11 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	for _, command := range verifyCommands {
 		started := time.Now()
 		err := runShell(ctx, jobDir, command, inheritedSafeEnv())
-		verification = append(verification, verifyResult{Command: command, Passed: err == nil, Duration: time.Since(started)})
+		verification = append(verification, verifyResult{
+			Command:  command,
+			Passed:   err == nil,
+			Duration: time.Since(started),
+		})
 		if err != nil {
 			return fmt.Errorf("verification command %q: %w", command, err)
 		}
@@ -178,19 +198,35 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 
 	stage = "pull-request"
 	prBody := buildPRBody(issue.Number, w.cfg.Worker.ID, lastMessage, verification)
-	pr, err := w.gh.CreatePR(ctx, repo, fmt.Sprintf("[Codex] #%d %s", issue.Number, issue.Title), branch, base, prBody)
+	pr, err := w.gh.CreatePR(
+		ctx,
+		repo,
+		fmt.Sprintf("[Codex] #%d %s", issue.Number, issue.Title),
+		branch,
+		base,
+		prBody,
+	)
 	if err != nil {
 		return err
 	}
+
 	_ = w.gh.RemoveLabel(ctx, repo, issue.Number, w.cfg.Labels.Running)
 	_ = w.gh.AddLabel(ctx, repo, issue.Number, w.cfg.Labels.Review)
-	_ = w.gh.Comment(ctx, repo, issue.Number, fmt.Sprintf("Implementation completed and is ready for review.\n\nPR: %s\nWorker: `%s`", pr.HTMLURL, w.cfg.Worker.ID))
+	_ = w.gh.Comment(ctx, repo, issue.Number, fmt.Sprintf(
+		"Implementation completed and is ready for review.\n\nPR: %s\nWorker: `%s`",
+		pr.HTMLURL,
+		w.cfg.Worker.ID,
+	))
 	w.log.Printf("%s#%d -> PR %s", repo, issue.Number, pr.HTMLURL)
 	return nil
 }
 
 func (w *Worker) ensureStateLabels(ctx context.Context, repo string) error {
-	defs := []struct{ name, color, desc string }{
+	defs := []struct {
+		name  string
+		color string
+		desc  string
+	}{
 		{w.cfg.Labels.Running, "fbca04", "issue-worker is processing this issue"},
 		{w.cfg.Labels.Review, "0e8a16", "issue-worker opened a pull request for review"},
 		{w.cfg.Labels.Failed, "d73a4a", "issue-worker failed"},
@@ -218,16 +254,26 @@ func (w *Worker) claim(ctx context.Context, repo string, number int) error {
 	if !gh.HasLabel(fresh, w.cfg.Labels.Running) || gh.HasLabel(fresh, w.cfg.Labels.Ready) {
 		return errors.New("claim verification failed")
 	}
+
 	_ = w.gh.RemoveLabel(ctx, repo, number, w.cfg.Labels.Failed)
 	_ = w.gh.RemoveLabel(ctx, repo, number, w.cfg.Labels.NoChange)
 	_ = w.gh.RemoveLabel(ctx, repo, number, w.cfg.Labels.Review)
-	return w.gh.Comment(ctx, repo, number, fmt.Sprintf("issue-worker claimed this job.\n\nWorker: `%s`\nStarted: %s", w.cfg.Worker.ID, time.Now().Format(time.RFC3339)))
+	_ = w.gh.Comment(ctx, repo, number, fmt.Sprintf(
+		"issue-worker claimed this job.\n\nWorker: `%s`\nStarted: %s",
+		w.cfg.Worker.ID,
+		time.Now().Format(time.RFC3339),
+	))
+	return nil
 }
 
 func (w *Worker) failJob(ctx context.Context, repo string, number int, stage string, cause error) {
 	_ = w.gh.RemoveLabel(ctx, repo, number, w.cfg.Labels.Running)
 	_ = w.gh.AddLabel(ctx, repo, number, w.cfg.Labels.Failed)
-	_ = w.gh.Comment(ctx, repo, number, fmt.Sprintf("issue-worker failed.\n\nWorker: `%s`\nStage: `%s`\nResult: FAILED\n\nSee the local worker log for details.", w.cfg.Worker.ID, stage))
+	_ = w.gh.Comment(ctx, repo, number, fmt.Sprintf(
+		"issue-worker failed.\n\nWorker: `%s`\nStage: `%s`\nResult: FAILED\n\nSee the local worker log for details.",
+		w.cfg.Worker.ID,
+		stage,
+	))
 	w.log.Printf("failure detail %s#%d stage=%s: %v", repo, number, stage, cause)
 }
 
@@ -236,10 +282,15 @@ func (w *Worker) finishNoChange(ctx context.Context, repo string, number int) er
 	if err := w.gh.AddLabel(ctx, repo, number, w.cfg.Labels.NoChange); err != nil {
 		return err
 	}
-	return w.gh.Comment(ctx, repo, number, fmt.Sprintf("issue-worker completed without repository changes.\n\nWorker: `%s`", w.cfg.Worker.ID))
+	return w.gh.Comment(ctx, repo, number, fmt.Sprintf(
+		"issue-worker completed without repository changes.\n\nWorker: `%s`",
+		w.cfg.Worker.ID,
+	))
 }
 
-func repoKey(repo string) string { return strings.ReplaceAll(repo, "/", "_") }
+func repoKey(repo string) string {
+	return strings.ReplaceAll(repo, "/", "_")
+}
 
 func (w *Worker) prepareWorktree(ctx context.Context, repo, base, branch string, issueNumber int, runID string) (string, error) {
 	root := expandHome(w.cfg.Workspace.Root)
@@ -273,10 +324,13 @@ func (w *Worker) prepareWorktree(ctx context.Context, repo, base, branch string,
 	return jobDir, nil
 }
 
-func (w *Worker) resetWorktreeBase(ctx context.Context, repo, jobDir, branch, base string) error {
+func (w *Worker) resetWorktreeBase(ctx context.Context, repo, jobDir, base string) error {
 	mirror := filepath.Join(expandHome(w.cfg.Workspace.Root), "repos", repoKey(repo)+".git")
 	if err := w.gitAuth(ctx, mirror, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
 		return err
+	}
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "show-ref", "--verify", "refs/heads/"+base); err != nil {
+		return fmt.Errorf("configured base branch %q not found: %w", base, err)
 	}
 	if _, err := run(ctx, jobDir, inheritedSafeEnv(), "git", "reset", "--hard", base); err != nil {
 		return err
@@ -284,13 +338,10 @@ func (w *Worker) resetWorktreeBase(ctx context.Context, repo, jobDir, branch, ba
 	if _, err := run(ctx, jobDir, inheritedSafeEnv(), "git", "clean", "-fd"); err != nil {
 		return err
 	}
-	if _, err := run(ctx, jobDir, inheritedSafeEnv(), "git", "branch", "-f", branch, base); err != nil {
-		return err
-	}
 	return nil
 }
 
-func (w *Worker) runCodex(ctx context.Context, dir, repo string, issue gh.Issue) (string, error) {
+func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string, issue gh.Issue) (string, error) {
 	configPath, err := gitConfigPath(ctx, dir)
 	if err != nil {
 		return "", err
@@ -299,7 +350,9 @@ func (w *Worker) runCodex(ctx context.Context, dir, repo string, issue gh.Issue)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = os.WriteFile(configPath, originalConfig, 0600) }()
+	defer func() {
+		_ = os.WriteFile(configPath, originalConfig, 0600)
+	}()
 
 	lastFile, err := os.CreateTemp("", "issue-worker-codex-last-*.txt")
 	if err != nil {
@@ -309,7 +362,13 @@ func (w *Worker) runCodex(ctx context.Context, dir, repo string, issue gh.Issue)
 	_ = lastFile.Close()
 	defer os.Remove(lastPath)
 
-	args := []string{"exec", "--sandbox", "workspace-write", "--ask-for-approval", "never", "--ephemeral", "--output-last-message", lastPath}
+	args := []string{
+		"exec",
+		"--sandbox", "workspace-write",
+		"--ask-for-approval", "never",
+		"--ephemeral",
+		"--output-last-message", lastPath,
+	}
 	if w.cfg.Codex.Model != "" {
 		args = append(args, "--model", w.cfg.Codex.Model)
 	}
@@ -321,16 +380,16 @@ func (w *Worker) runCodex(ctx context.Context, dir, repo string, issue gh.Issue)
 	}
 	args = append(args, "-")
 
-	prompt := buildPrompt(repo, issue)
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Dir = dir
 	cmd.Env = codexEnv()
-	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stdin = strings.NewReader(buildPrompt(repo, issue))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("codex exec: %w", err)
 	}
+
 	if err := os.WriteFile(configPath, originalConfig, 0600); err != nil {
 		return "", fmt.Errorf("restore git config: %w", err)
 	}
@@ -338,17 +397,12 @@ func (w *Worker) runCodex(ctx context.Context, dir, repo string, issue gh.Issue)
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(strings.TrimSpace(branch), "issue-worker/") {
-		return "", errors.New("Codex changed git branch metadata")
+	if strings.TrimSpace(branch) != expectedBranch {
+		return "", fmt.Errorf("Codex changed git branch metadata: got %q want %q", strings.TrimSpace(branch), expectedBranch)
 	}
+
 	b, _ := os.ReadFile(lastPath)
 	return strings.TrimSpace(string(b)), nil
-}
-
-type verifyResult struct {
-	Command  string
-	Passed   bool
-	Duration time.Duration
 }
 
 func buildPRBody(issue int, workerID, lastMessage string, verification []verifyResult) string {
@@ -360,7 +414,9 @@ func buildPRBody(issue int, workerID, lastMessage string, verification []verifyR
 	} else {
 		for _, v := range verification {
 			mark := "✅"
-			if !v.Passed { mark = "❌" }
+			if !v.Passed {
+				mark = "❌"
+			}
 			fmt.Fprintf(&b, "- %s `%s` (%s)\n", mark, oneLine(v.Command), v.Duration.Round(time.Millisecond))
 		}
 	}
@@ -404,37 +460,51 @@ func gitChanged(ctx context.Context, dir string) (bool, error) {
 }
 
 func gitCommit(ctx context.Context, dir string, issue int) error {
-	commands := [][]string{
-		{"git", "config", "user.name", "github-actions[bot]"},
-		{"git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"},
-		{"git", "add", "-A"},
-		{"git", "-c", "core.hooksPath=/dev/null", "commit", "-m", fmt.Sprintf("Implement #%d via issue-worker", issue)},
+	if _, err := run(ctx, dir, inheritedSafeEnv(), "git", "add", "-A"); err != nil {
+		return err
 	}
-	for _, c := range commands {
-		if _, err := run(ctx, dir, inheritedSafeEnv(), c[0], c[1:]...); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := run(
+		ctx,
+		dir,
+		inheritedSafeEnv(),
+		"git",
+		"-c", "user.name=issue-worker[bot]",
+		"-c", "user.email=issue-worker@users.noreply.github.com",
+		"-c", "core.hooksPath=/dev/null",
+		"commit", "-m", fmt.Sprintf("Implement #%d via issue-worker", issue),
+	)
+	return err
 }
 
 func gitConfigPath(ctx context.Context, dir string) (string, error) {
 	p, err := output(ctx, dir, inheritedSafeEnv(), "git", "rev-parse", "--git-path", "config")
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	p = strings.TrimSpace(p)
-	if !filepath.IsAbs(p) { p = filepath.Join(dir, p) }
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
 	return filepath.Clean(p), nil
 }
 
 func (w *Worker) gitAuth(ctx context.Context, dir string, args ...string) error {
 	askpass, err := os.CreateTemp("", "issue-worker-askpass-*.sh")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	path := taskpass.Name()
 	_, _ = io.WriteString(taskpass, "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' 'x-access-token' ;; *) printf '%s\\n' \"$ISSUE_WORKER_GIT_TOKEN\" ;; esac\n")
 	_ = taskpass.Close()
 	_ = os.Chmod(path, 0700)
 	defer os.Remove(path)
-	env := append(inheritedSafeEnv(), "GIT_ASKPASS="+path, "GIT_TERMINAL_PROMPT=0", "ISSUE_WORKER_GIT_TOKEN="+w.token)
+
+	env := append(
+		inheritedSafeEnv(),
+		"GIT_ASKPASS="+path,
+		"GIT_TERMINAL_PROMPT=0",
+		"ISSUE_WORKER_GIT_TOKEN="+w.token,
+	)
 	_, err = run(ctx, dir, env, "git", args...)
 	return err
 }
@@ -446,21 +516,29 @@ func runShell(ctx context.Context, dir, command string, env []string) error {
 
 func run(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	if dir != "" { cmd.Dir = dir }
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout = io.MultiWriter(os.Stdout, &out)
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil { return out.String(), fmt.Errorf("%s: %w", commandString(name, args), err) }
+	if err := cmd.Run(); err != nil {
+		return out.String(), fmt.Errorf("%s: %w", commandString(name, args), err)
+	}
 	return out.String(), nil
 }
 
 func output(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Env = env
 	b, err := cmd.Output()
-	if err != nil { return "", fmt.Errorf("%s: %w", commandString(name, args), err) }
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", commandString(name, args), err)
+	}
 	return string(b), nil
 }
 
@@ -474,11 +552,22 @@ func oneLine(s string) string {
 }
 
 func inheritedSafeEnv() []string {
-	allowed := map[string]bool{"HOME": true, "PATH": true, "TMPDIR": true, "USER": true, "LOGNAME": true, "SHELL": true, "LANG": true, "LC_ALL": true}
+	allowed := map[string]bool{
+		"HOME":    true,
+		"PATH":    true,
+		"TMPDIR":  true,
+		"USER":    true,
+		"LOGNAME": true,
+		"SHELL":   true,
+		"LANG":    true,
+		"LC_ALL":  true,
+	}
 	var env []string
 	for _, item := range os.Environ() {
 		key, _, ok := strings.Cut(item, "=")
-		if ok && allowed[key] { env = append(env, item) }
+		if ok && allowed[key] {
+			env = append(env, item)
+		}
 	}
 	sort.Strings(env)
 	return env
@@ -486,14 +575,18 @@ func inheritedSafeEnv() []string {
 
 func codexEnv() []string {
 	env := inheritedSafeEnv()
-	if v := os.Getenv("CODEX_HOME"); v != "" { env = append(env, "CODEX_HOME="+v) }
+	if v := os.Getenv("CODEX_HOME"); v != "" {
+		env = append(env, "CODEX_HOME="+v)
+	}
 	return env
 }
 
 func expandHome(path string) string {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
-			if path == "~" { return home }
+			if path == "~" {
+				return home
+			}
 			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 		}
 	}
@@ -503,31 +596,4 @@ func expandHome(path string) string {
 func CheckCommand(name string) error {
 	_, err := exec.LookPath(name)
 	return err
-}
-
-func ReadTokenFromKeychain() (string, error) {
-	if runtime.GOOS != "darwin" {
-		return "", errors.New("macOS Keychain lookup is only available on darwin")
-	}
-	cmd := exec.Command("security", "find-generic-password", "-s", "issue-worker", "-a", "github", "-w")
-	b, err := cmd.Output()
-	if err != nil { return "", err }
-	return strings.TrimSpace(string(b)), nil
-}
-
-func StoreTokenInKeychain(token string) error {
-	if runtime.GOOS != "darwin" {
-		return errors.New("macOS Keychain storage is only available on darwin")
-	}
-	if strings.TrimSpace(token) == "" { return errors.New("empty token") }
-	cmd := exec.Command("security", "add-generic-password", "-U", "-s", "issue-worker", "-a", "github", "-w", strings.TrimSpace(token))
-	cmd.Stdout = io.Discard
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func PromptToken(r io.Reader, out io.Writer) (string, error) {
-	fmt.Fprint(out, "Fine-grained GitHub PAT (input is not echoed only when your terminal handles it): ")
-	s, err := bufio.NewReader(r).ReadString('\n')
-	return strings.TrimSpace(s), err
 }
