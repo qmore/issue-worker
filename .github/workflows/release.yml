@@ -2,8 +2,10 @@ name: Release binaries
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - VERSION
 
 permissions:
   contents: write
@@ -21,10 +23,30 @@ jobs:
           go-version: '1.24.x'
           cache: false
 
-      - name: Build release archives
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            printf 'error: VERSION must look like v0.1.0, got %q\n' "$VERSION" >&2
+            exit 1
+          fi
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+
+      - name: Refuse duplicate release
         shell: bash
         env:
-          VERSION: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            printf 'error: release %s already exists\n' "$VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build release archives
+        shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p dist
@@ -59,8 +81,6 @@ jobs:
 
       - name: Verify release binaries
         shell: bash
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
           set -Eeuo pipefail
           mkdir -p verify
@@ -74,9 +94,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "$VERSION" \
             dist/issue-worker_*.tar.gz \
             dist/SHA256SUMS \
-            --verify-tag \
-            --title "${GITHUB_REF_NAME}" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
             --generate-notes
