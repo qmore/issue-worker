@@ -167,7 +167,29 @@ Run these from the installed Actions runner directory. Follow GitHub's generated
 
 Reference: https://docs.github.com/actions/how-tos/manage-runners/self-hosted-runners/configure-the-application
 
-## 7. Add the caller workflow
+## 7. Allow GitHub Actions to create pull requests
+
+`issue-worker` opens a PR after Codex finishes. GitHub can disable PR creation by `GITHUB_TOKEN` at the repository/Organization policy level. New personal-account repositories may have this disabled by default.
+
+In the target repository, check:
+
+```text
+Settings -> Actions -> General -> Workflow permissions
+```
+
+Enable:
+
+```text
+Allow GitHub Actions to create and approve pull requests
+```
+
+The worker only creates a PR; it does not approve or merge it.
+
+If an Organization policy disables this option, change the Organization policy or use an appropriately scoped GitHub App installation token / PAT according to your security policy.
+
+Reference: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository
+
+## 8. Add the caller workflow
 
 In the **private target repository**, copy `examples/issue-worker.yml` to:
 
@@ -204,7 +226,21 @@ jobs:
 
 Pin a release or full commit SHA once stable.
 
-## 8. Add project instructions
+### Note about CI on generated pull requests
+
+GitHub deliberately limits recursive workflow triggering by the repository `GITHUB_TOKEN`.
+
+With the default `${{ github.token }}`:
+
+- the worker's `git push` does **not** trigger normal `push` workflows
+- a generated PR can create `pull_request` workflow runs for `opened` / `synchronize` / `reopened`, but those runs are placed in an **approval-required** state
+- a user with write access can approve those workflows from the PR
+
+If your generated PR must start downstream CI automatically without manual approval, pass a GitHub App installation token (preferred for automation) or a suitably scoped PAT as `github-token` instead of `${{ github.token }}`. Protect that credential as a secret and keep its permissions minimal.
+
+Reference: https://docs.github.com/actions/concepts/security/github_token
+
+## 9. Add project instructions
 
 Add an `AGENTS.md` to the target repository if the project has rules Codex must follow.
 
@@ -220,7 +256,7 @@ Example:
 - Run `./scripts/test.sh` before finishing when available.
 ```
 
-## 9. Create the trigger label
+## 10. Create the trigger label
 
 Create:
 
@@ -237,7 +273,7 @@ codex:failed
 codex:no-change
 ```
 
-## 10. Smoke test
+## 11. Smoke test
 
 Create a harmless Issue such as:
 
@@ -282,6 +318,18 @@ The service account/session may not have access to the same keychain or `CODEX_H
 ### Worker rejects the actor
 
 The workflow actor must have write-level repository access. For `issues:labeled`, the actor is normally the person who applied the trigger label.
+
+### Private repository fetch fails
+
+`issue-worker` intentionally checks out with `persist-credentials: false`. Its wrapper performs required private fetch/push operations using a temporary AskPass helper and the supplied `github-token`. If this fails, verify the token has `contents: write` on the caller repository.
+
+### Pull request creation is denied
+
+Check **Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests**. Organization policy can override the repository setting.
+
+### Generated PR CI says approval is required
+
+This is expected when the PR was created with the repository `GITHUB_TOKEN`. Approve the workflow manually, or use a GitHub App installation token / PAT when fully automatic downstream CI is required.
 
 ### Codex cannot download dependencies
 
