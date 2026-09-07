@@ -36,15 +36,15 @@ No `sudo` is used.
 ## Install a specific version
 
 ```bash
-ISSUE_WORKER_VERSION=v0.1.0 \
-  curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh \
+  | ISSUE_WORKER_VERSION=v0.1.0 sh
 ```
 
 ## Custom install directory
 
 ```bash
-ISSUE_WORKER_INSTALL_DIR="$HOME/bin" \
-  curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh \
+  | ISSUE_WORKER_INSTALL_DIR="$HOME/bin" sh
 ```
 
 ## Verify
