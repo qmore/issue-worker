@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/qmore/issue-worker/internal/auth"
 	"github.com/qmore/issue-worker/internal/config"
 	gh "github.com/qmore/issue-worker/internal/github"
 	"github.com/qmore/issue-worker/internal/worker"
@@ -141,7 +142,7 @@ func cmdLogin(args []string) error {
 		}
 	}
 
-	if err := worker.StoreTokenInKeychain(token); err != nil {
+	if err := auth.StoreGitHubToken(token); err != nil {
 		return fmt.Errorf("store token in macOS Keychain: %w", err)
 	}
 	fmt.Println("Stored GitHub credential in macOS Keychain (service=issue-worker, account=github).")
@@ -157,9 +158,9 @@ func cmdDoctor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	checks := []string{"git", "codex"}
+
 	failed := false
-	for _, name := range checks {
+	for _, name := range []string{"git", "codex"} {
 		if err := worker.CheckCommand(name); err != nil {
 			fmt.Printf("[FAIL] %s installed: %v\n", name, err)
 			failed = true
@@ -168,7 +169,7 @@ func cmdDoctor(args []string) error {
 		}
 	}
 
-	token, err := loadToken()
+	token, err := auth.ReadGitHubToken()
 	if err != nil {
 		fmt.Printf("[FAIL] GitHub credential: %v\n", err)
 		failed = true
@@ -181,9 +182,14 @@ func cmdDoctor(args []string) error {
 			if err != nil {
 				fmt.Printf("[FAIL] repo access %s: %v\n", repo, err)
 				failed = true
-			} else {
-				fmt.Printf("[OK] repo access: %s (default=%s)\n", r.FullName, r.DefaultBranch)
+				continue
 			}
+			if !r.Private {
+				fmt.Printf("[FAIL] repo %s is public; daemon MVP accepts private targets only\n", repo)
+				failed = true
+				continue
+			}
+			fmt.Printf("[OK] repo access: %s (default=%s)\n", r.FullName, r.DefaultBranch)
 		}
 	}
 
@@ -225,7 +231,7 @@ func cmdRun(args []string, once bool) error {
 	if err != nil {
 		return err
 	}
-	token, err := loadToken()
+	token, err := auth.ReadGitHubToken()
 	if err != nil {
 		return err
 	}
@@ -242,18 +248,4 @@ func cmdRun(args []string, once bool) error {
 		return err
 	}
 	return nil
-}
-
-func loadToken() (string, error) {
-	if token := strings.TrimSpace(os.Getenv("ISSUE_WORKER_GITHUB_TOKEN")); token != "" {
-		return token, nil
-	}
-	token, err := worker.ReadTokenFromKeychain()
-	if err != nil {
-		return "", fmt.Errorf("GitHub token not found in environment or macOS Keychain: %w", err)
-	}
-	if token == "" {
-		return "", errors.New("empty GitHub token")
-	}
-	return token, nil
 }
