@@ -16,12 +16,6 @@ assert_contains() {
   grep -F -- "$text" "$file" >/dev/null 2>&1 || fail "Expected '$text' in $file"
 }
 
-# setup-command: success and failure must preserve the child exit result.
-ISSUE_WORKER_SETUP_COMMAND='true' bash "$ROOT/scripts/run-setup.sh"
-if ISSUE_WORKER_SETUP_COMMAND='false' bash "$ROOT/scripts/run-setup.sh"; then
-  fail "setup helper unexpectedly succeeded for false"
-fi
-
 # verification: skipped, passed and failed metadata.
 OUT="$TMP/verify.out"
 : > "$OUT"
@@ -38,7 +32,7 @@ if GITHUB_OUTPUT="$OUT" ISSUE_WORKER_USER_VERIFY_COMMAND='false' bash "$ROOT/scr
 fi
 assert_contains "$OUT" 'verification-result=failed'
 
-# Mock gh for cleanup and PR annotation tests.
+# Mock gh for authorization, cleanup and PR annotation tests.
 MOCKBIN="$TMP/bin"
 mkdir -p "$MOCKBIN"
 GH_LOG="$TMP/gh.log"
@@ -49,6 +43,11 @@ cat > "$MOCKBIN/gh" <<'MOCK_GH'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$GH_LOG"
+
+if [[ "$1" == 'api' ]]; then
+  printf '%s\n' "${MOCK_CAN_PUSH:-true}"
+  exit 0
+fi
 
 if [[ "$1 $2" == 'issue view' ]]; then
   printf '%s\n' "${MOCK_ISSUE_LABELS:-}"
@@ -81,8 +80,38 @@ COMMON_ENV=(
   "ISSUE_WORKER_GITHUB_TOKEN=dummy"
   "ISSUE_WORKER_ISSUE_NUMBER=123"
   "GITHUB_REPOSITORY=owner/repo"
+  "GITHUB_ACTOR=tester"
   "GITHUB_RUN_ID=456"
 )
+
+# setup-command: authorized success and failure preserve child result.
+: > "$GH_LOG"
+env "${COMMON_ENV[@]}" \
+  MOCK_CAN_PUSH='true' \
+  ISSUE_WORKER_SETUP_COMMAND='true' \
+  bash "$ROOT/scripts/run-setup.sh"
+assert_contains "$GH_LOG" 'api repos/owner/repo/collaborators/tester/permission'
+
+: > "$GH_LOG"
+if env "${COMMON_ENV[@]}" \
+  MOCK_CAN_PUSH='true' \
+  ISSUE_WORKER_SETUP_COMMAND='false' \
+  bash "$ROOT/scripts/run-setup.sh"; then
+  fail "setup helper unexpectedly succeeded for false"
+fi
+assert_contains "$GH_LOG" '--add-label codex:failed'
+
+# Unauthorized actors must be rejected before host-side setup executes.
+SETUP_SENTINEL="$TMP/setup-ran"
+rm -f "$SETUP_SENTINEL"
+if env "${COMMON_ENV[@]}" \
+  MOCK_CAN_PUSH='false' \
+  SETUP_SENTINEL="$SETUP_SENTINEL" \
+  ISSUE_WORKER_SETUP_COMMAND='touch "$SETUP_SENTINEL"' \
+  bash "$ROOT/scripts/run-setup.sh"; then
+  fail "unauthorized setup unexpectedly succeeded"
+fi
+[[ ! -e "$SETUP_SENTINEL" ]] || fail "unauthorized setup command executed"
 
 # cleanup: failure + working => failed, with working removed.
 : > "$GH_LOG"
