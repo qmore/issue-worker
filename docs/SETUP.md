@@ -4,17 +4,15 @@ This guide prepares a trusted private repository and a self-hosted Mac/Linux mac
 
 ## 1. Decide runner scope
 
-Choose one:
-
 ### Repository-level runner
 
-Use this when one machine/job registration belongs to one repository.
+Use when the runner registration belongs to one repository.
 
 ```text
 private repo A -> repo A runner -> issue-worker -> Codex
 ```
 
-Register it at:
+GitHub navigation:
 
 ```text
 Repository -> Settings -> Actions -> Runners -> New self-hosted runner
@@ -22,7 +20,7 @@ Repository -> Settings -> Actions -> Runners -> New self-hosted runner
 
 ### Organization-level runner
 
-Use this when several repositories in one Organization should share the same runner pool.
+Use when multiple Organization repositories should share a runner pool.
 
 ```text
 repo A --\
@@ -30,33 +28,41 @@ repo B ----> Organization runner -> issue-worker -> Codex
 repo C --/
 ```
 
-Register it at:
+GitHub navigation:
 
 ```text
 Organization -> Settings -> Actions -> Runners -> New runner
 ```
 
-Control which repositories may use the runner with Organization runner groups / repository access policy.
+Control repository access with Organization runner groups/policy.
 
-`issue-worker` itself does not care which scope you choose. The caller workflow decides `runs-on`.
+`issue-worker` does not care which scope you choose. The caller repository owns `runs-on`.
 
 ## 2. Prepare the runner account
 
-Prefer a dedicated macOS/Linux user for automated development. The account should have:
+Prefer a dedicated macOS/Linux user with:
 
-- write access to the GitHub Actions runner working directory
-- access to the project toolchain
+- write access to the Actions runner working directory
+- the project toolchain
 - Codex CLI authentication
 - no unnecessary administrator privileges
-- no unrelated SSH keys, cloud credentials, browser profiles, or production secrets
+- no unrelated production/cloud/SSH/browser credentials
 
 Do not use a public-repository self-hosted runner for this workload.
 
 ## 3. Install prerequisites
 
+Required:
+
+```text
+git
+gh
+codex
+```
+
 ### macOS
 
-Git is available after Xcode Command Line Tools:
+Install Xcode Command Line Tools if needed:
 
 ```bash
 xcode-select --install
@@ -68,13 +74,7 @@ Install GitHub CLI, for example with Homebrew:
 brew install gh
 ```
 
-Install Codex CLI using the current OpenAI standalone installer:
-
-```bash
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
-
-Check:
+Install Codex using the current supported OpenAI installation path, then check:
 
 ```bash
 git --version
@@ -84,25 +84,13 @@ codex --version
 
 ### Linux
 
-Install Git and GitHub CLI using your distribution/vendor instructions, then install Codex:
-
-```bash
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
+Install Git and GitHub CLI through your distribution/vendor process, install Codex using the current supported OpenAI path, and verify all three commands.
 
 ## 4. Authenticate Codex
 
-OpenAI recommends API-key authentication for general CI/CD. `issue-worker` is intentionally optimized for trusted persistent self-hosted runners and can reuse local Codex CLI authentication.
+Authenticate under the same OS account that will run the GitHub Actions service.
 
-Run once interactively on the runner account:
-
-```bash
-codex
-```
-
-Choose the desired sign-in method.
-
-Verify non-interactive authentication without granting write access:
+Verify non-interactive authentication with a read-only run:
 
 ```bash
 codex exec \
@@ -112,27 +100,13 @@ codex exec \
   "Reply with the single word OK."
 ```
 
-### ChatGPT-managed authentication on a persistent runner
+Treat Codex authentication material like a password. Never commit it, upload it as an artifact, or paste it into workflow YAML/Issues/chat.
 
-If you intentionally use ChatGPT-managed Codex authentication in CI, OpenAI documents this as an advanced trusted-runner pattern.
+## 5. Register the self-hosted runner
 
-Important rules:
+Use GitHub's **New self-hosted runner** page for the selected repository/Organization scope.
 
-- treat `~/.codex/auth.json` like a password
-- never commit or upload it as an artifact
-- use one auth cache per runner / serialized stream
-- do not overwrite a refreshed auth file with an old seed every run
-- reseed with `codex login` if refresh fails
-
-On headless or service-oriented runners, file-backed credential storage can be easier to operate than a GUI keychain. Follow the current OpenAI guidance rather than copying auth tokens into workflow YAML.
-
-Reference: https://developers.openai.com/codex/auth/ci-cd-auth
-
-## 5. Register the GitHub self-hosted runner
-
-Open GitHub's **New self-hosted runner** page at the repository or Organization scope selected in step 1.
-
-GitHub generates platform-specific download/configuration commands and a time-limited registration token. Run exactly the commands GitHub provides.
+GitHub generates platform-specific commands and a short-lived registration token. Run the generated commands exactly as provided.
 
 Recommended custom label:
 
@@ -140,22 +114,18 @@ Recommended custom label:
 codex
 ```
 
-You can supply labels during runner configuration or add them later in GitHub settings.
-
-The runner should eventually show:
+Acceptance check:
 
 ```text
 Connected to GitHub
 Listening for Jobs
 ```
 
-GitHub registration tokens are short-lived; do not hard-code them in documentation or scripts.
+or GitHub shows the runner online/idle.
 
 ## 6. Run the runner as a service
 
-After the runner has been registered, GitHub creates `svc.sh` in the runner directory.
-
-On macOS, GitHub supports a launchd-backed service:
+On macOS, after registration, GitHub commonly supports:
 
 ```bash
 ./svc.sh install
@@ -163,41 +133,33 @@ On macOS, GitHub supports a launchd-backed service:
 ./svc.sh status
 ```
 
-Run these from the installed Actions runner directory. Follow GitHub's generated/current platform instructions if they differ.
+Run these from the Actions runner directory and follow GitHub's current generated instructions if they differ.
 
-Reference: https://docs.github.com/actions/how-tos/manage-runners/self-hosted-runners/configure-the-application
+Verify the service sees the same HOME/PATH/Codex authentication as the intended runner account.
 
-## 7. Allow GitHub Actions to create pull requests
+## 7. Allow Actions to create pull requests
 
-`issue-worker` opens a PR after Codex finishes. GitHub can disable PR creation by `GITHUB_TOKEN` at the repository/Organization policy level. New personal-account repositories may have this disabled by default.
+`issue-worker` opens a PR after successful verification.
 
-In the target repository, check:
+Check:
 
 ```text
 Settings -> Actions -> General -> Workflow permissions
 ```
 
-Enable:
+Enable GitHub Actions PR creation if repository/Organization policy permits it.
 
-```text
-Allow GitHub Actions to create and approve pull requests
-```
-
-The worker only creates a PR; it does not approve or merge it.
-
-If an Organization policy disables this option, change the Organization policy or use an appropriately scoped GitHub App installation token / PAT according to your security policy.
-
-Reference: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository
+The worker does not approve or merge its own PR.
 
 ## 8. Add the caller workflow
 
-In the **private target repository**, copy `examples/issue-worker.yml` to:
+Copy [../examples/issue-worker.yml](../examples/issue-worker.yml) to the private target repository as:
 
 ```text
 .github/workflows/issue-worker.yml
 ```
 
-Minimum form:
+Recommended form:
 
 ```yaml
 name: Issue Worker
@@ -205,6 +167,10 @@ name: Issue Worker
 on:
   issues:
     types: [labeled]
+
+concurrency:
+  group: issue-worker-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   implement:
@@ -218,31 +184,128 @@ jobs:
       pull-requests: write
 
     steps:
-      - uses: qmore/issue-worker@main
+      - name: Implement Issue with local Codex
+        uses: qmore/issue-worker@main
         with:
           github-token: ${{ github.token }}
           issue-number: ${{ github.event.issue.number }}
+
+          # Optional:
+          # setup-command: './scripts/bootstrap-deps.sh'
+          # verify-command: './scripts/verify.sh'
+
+  cleanup-state:
+    needs: implement
+    if: always() && github.event.label.name == 'codex:run'
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Recover stale issue-worker state
+        uses: qmore/issue-worker/cleanup@main
+        with:
+          github-token: ${{ github.token }}
+          issue-number: ${{ github.event.issue.number }}
+          job-result: ${{ needs.implement.result }}
 ```
 
-Pin a release or full commit SHA once stable.
+Pin **both** `uses:` entries to the same release tag or full commit SHA for production.
 
-### Note about CI on generated pull requests
+## 9. Configure dependency setup
 
-GitHub deliberately limits recursive workflow triggering by the repository `GITHUB_TOKEN`.
+Use `setup-command` when dependencies must be prepared before Codex starts:
 
-With the default `${{ github.token }}`:
+```yaml
+setup-command: |
+  composer install --prefer-dist --no-interaction --no-progress
+  npm ci
+```
 
-- the worker's `git push` does **not** trigger normal `push` workflows
-- a generated PR can create `pull_request` workflow runs for `opened` / `synchronize` / `reopened`, but those runs are placed in an **approval-required** state
-- a user with write access can approve those workflows from the PR
+This step:
 
-If your generated PR must start downstream CI automatically without manual approval, pass a GitHub App installation token (preferred for automation) or a suitably scoped PAT as `github-token` instead of `${{ github.token }}`. Protect that credential as a secret and keep its permissions minimal.
+- runs after checkout
+- runs outside the Codex sandbox
+- runs before Codex
+- stops the job if it fails
+- marks the Issue `codex:failed` on setup failure
+- does not pass the issue-worker GitHub token into the setup child process
+- does not inject the setup command into the Codex prompt
 
-Reference: https://docs.github.com/actions/concepts/security/github_token
+Prefer this plus runner/package-manager caches instead of granting Codex network access solely for dependency installation.
 
-## 9. Add project instructions
+Do not put literal secrets in the command text.
 
-Add an `AGENTS.md` to the target repository if the project has rules Codex must follow.
+## 10. Configure verification
+
+Use `verify-command` for deterministic checks after Codex:
+
+```yaml
+verify-command: |
+  php artisan test
+  npm run build
+```
+
+Verification runs outside the Codex sandbox **after Codex and before commit/push/PR**.
+
+If verification fails:
+
+```text
+no commit
+no push
+no PR
+Issue -> codex:failed
+```
+
+If it succeeds, the generated PR contains a concise Verification section with:
+
+- command text
+- passed/skipped state
+- Actions run URL
+
+stdout/stderr remains in the Actions log and is not copied into the PR.
+
+## 11. Why the cleanup job is separate
+
+The main Action can catch ordinary shell errors, but no shell trap can execute after:
+
+- runner power loss
+- runner process kill
+- OS restart
+- runner disappearance
+- some cancellation paths
+
+Therefore the recommended workflow has a second job:
+
+```text
+self-hosted implement
+        |
+        | needs + always()
+        v
+GitHub-hosted cleanup-state
+```
+
+Cleanup treats these as terminal and leaves them alone:
+
+```text
+codex:review
+codex:no-change
+```
+
+If the implementation result is `failure` or `cancelled` and the Issue still has `codex:working`, cleanup:
+
+```text
+remove codex:working
+add codex:failed
+comment Actions run URL
+```
+
+A platform-level force-cancel that prevents all remaining jobs from starting cannot be repaired by a later job in the same workflow.
+
+## 12. Add project instructions
+
+Add or maintain `AGENTS.md` in the target repository for durable project constraints.
 
 Example:
 
@@ -250,13 +313,15 @@ Example:
 # AGENTS.md
 
 - Build with `./scripts/build.sh`.
+- Run `./scripts/test.sh` before finishing.
 - Do not change generated files under `vendor/`.
 - C++11 and later are not allowed.
-- Keep public API compatibility unless an Issue explicitly changes it.
-- Run `./scripts/test.sh` before finishing when available.
+- Keep changes scoped to the Issue.
 ```
 
-## 10. Create the trigger label
+Do not put credentials or machine-local secrets in `AGENTS.md`.
+
+## 13. Create the trigger label
 
 Create:
 
@@ -264,7 +329,7 @@ Create:
 codex:run
 ```
 
-The other state labels are created/updated automatically by the worker when permissions allow it:
+The worker manages these state labels when allowed:
 
 ```text
 codex:working
@@ -273,68 +338,80 @@ codex:failed
 codex:no-change
 ```
 
-## 11. Smoke test
+## 14. Smoke test
 
-Create a harmless Issue such as:
+Create a harmless Issue:
 
 ```text
 Title: Add issue-worker smoke-test note
 
-Add a file named ISSUE_WORKER_SMOKE_TEST.md containing one sentence that says the worker is configured correctly. Do not change any other files.
+Add ISSUE_WORKER_SMOKE_TEST.md containing one sentence that says the worker is configured correctly. Do not change any other files.
 ```
 
-Apply `codex:run` manually as a repository maintainer.
+Apply `codex:run` as a repository maintainer.
 
-Expected result:
+Expected path:
 
 1. workflow starts on the self-hosted runner
-2. label changes to `codex:working`
-3. Codex edits the checkout
-4. worker commits/pushes a `codex/issue-...` branch
-5. worker opens a pull request
-6. Issue receives `codex:review`
+2. optional setup passes
+3. Issue becomes `codex:working`
+4. Codex edits the checkout
+5. optional verification passes
+6. worker pushes a `codex/issue-...` branch
+7. worker opens a PR
+8. PR shows Verification state
+9. Issue becomes `codex:review`
+10. cleanup job observes terminal state and does nothing
 
-Review the PR, then delete the smoke-test file/branch if not wanted.
+Review the PR manually.
+
+## 15. Optional cleanup recovery test
+
+With a disposable smoke-test Issue:
+
+1. start the worker
+2. wait for `codex:working`
+3. cancel the implementation job normally
+4. confirm GitHub-hosted `cleanup-state` runs
+5. confirm `codex:working` is removed
+6. confirm `codex:failed` is added
+
+Do not test this by powering off a shared production machine.
 
 ## Troubleshooting
 
 ### Job stays queued
 
-The caller repository cannot see an online runner matching `runs-on`. Check:
-
-- runner scope (repository vs Organization)
-- runner group access
-- custom `codex` label
-- service status
+Check runner scope, runner group access, `codex` label, service status, and whether the only runner is busy.
 
 ### `codex` not found
 
-The Actions runner service may have a different PATH than your interactive shell. Install Codex in a PATH visible to the service account or configure the service environment accordingly.
+The service PATH may differ from the interactive shell. Check `whoami`, `HOME`, `PATH`, and `command -v codex` in the runner service context.
 
 ### Codex authentication fails only as a service
 
-The service account/session may not have access to the same keychain or `CODEX_HOME` as your terminal. Verify the service user and credential storage. For persistent CI use, follow OpenAI's ChatGPT-managed auth guide if applicable.
+Verify the service account/session and credential storage. Do not print auth contents into logs.
 
-### Worker rejects the actor
+### setup-command fails
 
-The workflow actor must have write-level repository access. For `issues:labeled`, the actor is normally the person who applied the trigger label.
+Read the setup step Actions log. Fix dependency/toolchain preparation rather than enabling broad Codex network access as the first response.
+
+### verification fails
+
+This is a hard gate by design. The worker should not create a PR. Fix the generated code or the verification environment; do not bypass the gate merely to produce a PR.
+
+### `codex:working` remains after cancellation
+
+Confirm the caller has the `cleanup-state` job, `if: always()`, `needs: implement`, and `issues: write`.
 
 ### Private repository fetch fails
 
-`issue-worker` intentionally checks out with `persist-credentials: false`. Its wrapper performs required private fetch/push operations using a temporary AskPass helper and the supplied `github-token`. If this fails, verify the token has `contents: write` on the caller repository.
+The worker intentionally uses `persist-credentials: false` and temporary AskPass authentication. Verify the supplied token has caller-repository `contents: write`.
 
-### Pull request creation is denied
+### Pull request creation denied
 
-Check **Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests**. Organization policy can override the repository setting.
+Check Actions workflow permissions at repository and Organization scope.
 
-### Generated PR CI says approval is required
+### Generated PR CI requires approval
 
-This is expected when the PR was created with the repository `GITHUB_TOKEN`. Approve the workflow manually, or use a GitHub App installation token / PAT when fully automatic downstream CI is required.
-
-### Codex cannot download dependencies
-
-`workspace-write` has restricted network access by default. Prefer preinstalled/cached dependencies. If the project genuinely requires network access, set `allow-network: 'true'` only on a trusted runner/repository and review the security implications.
-
-### A command needs interactive approval
-
-`issue-worker` runs Codex with `--ask-for-approval never`. The job will not pause for a person. Adjust the runner/project so required commands fit the configured sandbox rather than bypassing the sandbox.
+This can occur when the PR is created using the repository `GITHUB_TOKEN`. Approve according to repository policy or use an approved GitHub App/PAT design when fully automatic downstream CI is required.

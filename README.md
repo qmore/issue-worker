@@ -2,15 +2,11 @@
 
 Turn a trusted GitHub Issue into a local Codex implementation job on your own self-hosted runner.
 
-`issue-worker` is a reusable GitHub Composite Action for private repositories. A maintainer adds a trigger label such as `codex:run` to an Issue, GitHub Actions routes the job to a self-hosted runner, and the action asks the Codex CLI on that machine to implement the Issue. The action creates a dedicated branch, commits the result, pushes it, and opens a pull request for human review.
+`issue-worker` is a reusable GitHub Composite Action for trusted private repositories. A maintainer adds `codex:run` to an Issue, GitHub Actions routes the job to a self-hosted runner, and the local Codex CLI implements the Issue. The wrapper verifies the result, creates a branch, pushes it, and opens a pull request for human review.
 
-> **Status:** early v0.x / experimental. Use only on trusted private repositories and review every generated pull request before merging.
+> **Status:** early v0.x / experimental. Review every generated pull request before merging.
 
-## Why this exists
-
-Codex Cloud is useful when the project can run in a cloud environment. Some projects cannot: embedded toolchains, licensed SDKs, local hardware, private networks, large caches, or development environments that already exist on a workstation or build machine.
-
-`issue-worker` keeps execution on your machine:
+## Flow
 
 ```text
 GitHub Issue
@@ -19,33 +15,44 @@ GitHub Issue
    v
 GitHub Actions
    |
-   | runs-on: self-hosted
    v
-Your Mac / Linux runner
+self-hosted runner
    |
-   v
-Codex CLI
+   +--> setup-command       (trusted, outside Codex sandbox)
    |
-   +-- edits the checked-out repository
-   +-- may run local build/test tools allowed by the Codex sandbox
+   +--> Codex CLI           (workspace-write sandbox)
+   |
+   +--> verify-command      (trusted, outside Codex sandbox)
+   |
    v
 branch -> commit -> push -> Pull Request
+   |
+   v
+codex:review
 ```
 
-The public `issue-worker` repository contains orchestration logic only. Your private source code and Codex authentication remain on the caller repository / self-hosted runner.
+If the self-hosted runner disappears after `codex:working` is applied, an optional GitHub-hosted cleanup job can recover the Issue to `codex:failed`.
 
-## Design
+## Why this exists
 
-There are three separate responsibilities:
+Codex Cloud is useful when a project can run in a cloud environment. Some projects cannot: embedded toolchains, licensed SDKs, local hardware, private networks, large caches, or development environments already installed on a workstation/build machine.
 
-- **Caller workflow** — decides *when* to run and *which runner* executes the job.
-- **issue-worker** — implements the common Issue -> Codex -> branch -> PR orchestration.
-- **Self-hosted runner** — provides the real local development environment and Codex CLI authentication.
+`issue-worker` keeps the implementation environment local while using GitHub Issues and Pull Requests as the job queue and review surface.
 
-Because `issue-worker` is a Composite Action, `runs-on` stays in the caller repository. The same package therefore works with either:
+## Design boundaries
 
-- a repository-level self-hosted runner, or
-- an Organization-level self-hosted runner shared by several repositories.
+```text
+GitHub Issue       = WHAT to implement
+AGENTS.md          = HOW code should be written
+caller workflow    = WHEN / WHERE execution is allowed
+issue-worker       = orchestration
+self-hosted runner = actual development environment
+```
+
+Because the package is a Composite Action, `runs-on` stays in the caller repository. The same Action works with either:
+
+- a repository-level self-hosted runner
+- an Organization-level self-hosted runner shared by multiple repositories
 
 ## Requirements
 
@@ -55,9 +62,9 @@ On the self-hosted runner:
 - GitHub CLI (`gh`)
 - Codex CLI
 - working Codex authentication
-- the build/test toolchain required by the target repository
+- the project build/test toolchain
 
-The caller workflow needs these `GITHUB_TOKEN` permissions:
+The implementation job needs:
 
 ```yaml
 permissions:
@@ -66,39 +73,30 @@ permissions:
   pull-requests: write
 ```
 
+The optional cleanup job only needs:
+
+```yaml
+permissions:
+  issues: write
+```
+
 ## Quick start
 
-### 1. Prepare the self-hosted runner
+### 1. Prepare the runner
 
-Install and authenticate Codex on the runner. On macOS/Linux, OpenAI currently documents:
+Install Git/`gh`/Codex and authenticate Codex under the OS account that runs the GitHub Actions runner.
 
-```bash
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+Register the machine as a repository-level or Organization-level self-hosted runner and give it a label such as:
+
+```text
 codex
 ```
 
-Complete sign-in once, then verify non-interactive execution:
+See [docs/SETUP.md](docs/SETUP.md) and [docs/LLM_SETUP.md](docs/LLM_SETUP.md).
 
-```bash
-codex exec --sandbox read-only --ask-for-approval never \
-  "Reply with the single word OK."
-```
+### 2. Add the caller workflow
 
-Install GitHub CLI if needed (macOS/Homebrew):
-
-```bash
-brew install gh
-```
-
-Register the machine as a GitHub self-hosted runner for the target repository or Organization. Giving it a custom label such as `codex` is recommended.
-
-Detailed setup: [docs/SETUP.md](docs/SETUP.md)
-
-LLM-oriented deterministic setup guide: [docs/LLM_SETUP.md](docs/LLM_SETUP.md)
-
-### 2. Add a workflow to the private project
-
-Create `.github/workflows/issue-worker.yml` in the **private target repository**:
+Create `.github/workflows/issue-worker.yml` in the private target repository:
 
 ```yaml
 name: Issue Worker
@@ -123,52 +121,158 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Run issue-worker
+      - name: Implement Issue with local Codex
         uses: qmore/issue-worker@main
         with:
           github-token: ${{ github.token }}
           issue-number: ${{ github.event.issue.number }}
+
+          # Optional trusted preparation before Codex:
+          # setup-command: |
+          #   composer install --prefer-dist --no-interaction --no-progress
+          #   npm ci
+
+          # Optional trusted verification after Codex:
+          # verify-command: |
+          #   php artisan test
+          #   npm run build
+
+  cleanup-state:
+    needs: implement
+    if: always() && github.event.label.name == 'codex:run'
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Recover stale issue-worker state
+        uses: qmore/issue-worker/cleanup@main
+        with:
+          github-token: ${{ github.token }}
+          issue-number: ${{ github.event.issue.number }}
+          job-result: ${{ needs.implement.result }}
 ```
 
-For production use, pin to a release tag or commit SHA instead of `@main`.
+For production use, pin **both** `uses:` entries to the same release tag or full commit SHA instead of `@main`.
 
-### 3. Add the trigger label
+### 3. Trigger a job
 
-Create the label:
+Create an Issue with a concrete implementation request and add:
 
 ```text
 codex:run
 ```
 
-Create an Issue with a concrete implementation request, then add `codex:run`.
-
-The action will change state labels automatically:
+Typical state transition:
 
 ```text
 codex:run
    -> codex:working
-   -> codex:review   (PR created)
-
-or
-   -> codex:failed
-   -> codex:no-change
+   -> codex:review
 ```
 
-## What the worker does
+Failure/no-change paths:
 
-1. Verifies the workflow actor has write/maintain/admin access to the caller repository.
-2. Fetches the Issue title and body.
-3. Removes the trigger label and applies `codex:working`.
-4. Creates a branch based on the configured base branch.
-5. Builds a guarded prompt from the Issue.
-6. Runs `codex exec` non-interactively with a workspace-write sandbox.
-7. Optionally executes a caller-supplied verification command.
-8. Commits changed files.
-9. Pushes the branch.
-10. Opens a pull request referencing the Issue.
-11. Applies `codex:review`, or `codex:failed` on failure.
+```text
+codex:failed
+codex:no-change
+```
 
-Codex is explicitly instructed **not** to commit or push. Git operations are performed by the wrapper after Codex finishes.
+## `setup-command`
+
+`setup-command` runs after checkout and before Codex, outside the Codex sandbox.
+
+Use it to prepare trusted dependencies without enabling Codex network access:
+
+```yaml
+setup-command: |
+  composer install --prefer-dist --no-interaction --no-progress
+  npm ci
+```
+
+Properties:
+
+- optional; empty preserves the original behavior
+- failure prevents Codex from starting
+- failure marks the Issue `codex:failed`
+- command text is not mixed into the Codex prompt
+- the issue-worker GitHub token is not exported to the setup child process
+
+Package-manager-specific logic and caches intentionally stay in the caller workflow/runner.
+
+## Verification
+
+`verify-command` runs after Codex and before commit/push/PR:
+
+```yaml
+verify-command: |
+  php artisan test
+  npm run build
+```
+
+If verification fails, the worker does **not** commit, push, or create a PR.
+
+Successful PRs receive a concise section like:
+
+```markdown
+## Verification
+
+- ✅ Result: **Passed**
+- Command:
+
+    php artisan test
+    npm run build
+
+- Actions run: ...
+```
+
+Only command text, result, and Actions run URL are added to the PR; verification stdout/stderr remains in the Actions log.
+
+The Action exposes:
+
+```text
+verification-result = passed | skipped
+```
+
+## Abnormal termination recovery
+
+Shell traps cannot run after a hard runner/process failure. The separate `qmore/issue-worker/cleanup` Action is intended to run from a GitHub-hosted cleanup job using `if: always()`.
+
+It follows these rules:
+
+```text
+codex:review / codex:no-change
+  -> terminal; never overwrite
+
+failure/cancelled + codex:working
+  -> remove codex:working
+  -> add codex:failed
+  -> comment with Actions run URL
+```
+
+This covers normal job failure/cancellation/offline-runner recovery once GitHub schedules the cleanup job. A platform-level force-cancel that prevents all remaining jobs from starting cannot be repaired by a later job in the same workflow.
+
+## Security model
+
+This project targets **trusted private repositories**.
+
+Important invariants:
+
+- Issue content is treated as untrusted prompt input
+- the trigger actor must have write-level repository access
+- checkout credentials are not persisted
+- the wrapper GitHub token is not passed to Codex
+- Codex starts with a minimized environment via `env -i`
+- Codex uses `workspace-write`
+- unattended approval mode is non-interactive
+- Codex does not commit, push, or create PRs
+- wrapper Git operations restore/protect local Git configuration
+- automated commits disable Git hooks
+- each run gets a new branch
+- human PR review remains the default boundary
+
+Read [docs/SECURITY.md](docs/SECURITY.md) before enabling the worker.
 
 ## Inputs
 
@@ -176,87 +280,20 @@ Codex is explicitly instructed **not** to commit or push. Git operations are per
 | --- | --- | --- | --- |
 | `github-token` | yes | - | Caller repository `GITHUB_TOKEN`. |
 | `issue-number` | yes | - | Issue number to implement. |
-| `base-branch` | no | repository default | Branch the generated branch starts from and PR targets. |
-| `trigger-label` | no | `codex:run` | Trigger label removed when work starts. |
-| `working-label` | no | `codex:working` | Applied while Codex is running. |
-| `review-label` | no | `codex:review` | Applied after a PR is opened. |
-| `failed-label` | no | `codex:failed` | Applied when the worker fails. |
-| `no-change-label` | no | `codex:no-change` | Applied when Codex makes no tracked changes. |
-| `branch-prefix` | no | `codex/issue-` | Prefix for generated branches. |
-| `verify-command` | no | empty | Trusted shell command run after Codex, e.g. `npm test`. |
-| `codex-model` | no | empty | Optional model override. Empty uses the local Codex default. |
-| `codex-effort` | no | empty | Optional reasoning effort override. |
-| `allow-network` | no | `false` | Enables network access inside the Codex workspace-write sandbox for this run. |
+| `base-branch` | no | repository default | PR base branch. |
+| `trigger-label` | no | `codex:run` | Explicit execution trigger. |
+| `working-label` | no | `codex:working` | Active state. |
+| `review-label` | no | `codex:review` | PR-created state. |
+| `failed-label` | no | `codex:failed` | Failure state. |
+| `no-change-label` | no | `codex:no-change` | Successful no-change state. |
+| `branch-prefix` | no | `codex/issue-` | Generated branch prefix. |
+| `setup-command` | no | empty | Trusted dependency/setup command before Codex. |
+| `verify-command` | no | empty | Trusted verification before commit/push/PR. |
+| `codex-model` | no | empty | Optional model override. |
+| `codex-effort` | no | empty | Optional reasoning-effort override. |
+| `allow-network` | no | `false` | Codex sandbox network access. |
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
-
-## Project instructions
-
-Put repository-specific rules in `AGENTS.md` in the **target repository**. Examples:
-
-- language / compiler restrictions
-- forbidden directories
-- build commands
-- test commands
-- formatting rules
-- architectural conventions
-- hardware-specific cautions
-
-A useful separation is:
-
-```text
-GitHub Issue       = WHAT to implement
-AGENTS.md          = HOW code should be written
-caller workflow    = WHEN / WHERE it is allowed to run
-issue-worker       = orchestration
-self-hosted runner = actual environment
-```
-
-## Security model
-
-This project intentionally targets **trusted private repositories**.
-
-An Issue body becomes input to a coding agent running on a real machine. Treat triggering a job as equivalent to granting an automated developer access to the checked-out workspace and the commands allowed by the Codex sandbox.
-
-Important defaults / recommendations:
-
-- Trigger by a label, not by arbitrary words in an Issue body.
-- The worker checks that the actor who triggered the workflow has write-level repository access.
-- Use a dedicated runner account with the minimum OS permissions required.
-- Keep Codex in `workspace-write` and non-interactive `never` approval mode.
-- Do not give the Codex process GitHub tokens, PATs, SSH private keys, or unrelated secrets.
-- Keep credentials outside the checked-out repository.
-- Do not use the same self-hosted runner for untrusted public-repository pull requests.
-- Review the generated PR before merging.
-- Prefer release tags or commit-SHA pinning for third-party Actions.
-
-Read [docs/SECURITY.md](docs/SECURITY.md) before enabling the worker.
-
-## Authentication
-
-`issue-worker` is designed for a persistent trusted self-hosted runner and invokes the locally installed `codex` CLI. It therefore reuses the runner's existing Codex authentication.
-
-OpenAI recommends API-key authentication as the default for CI/CD. ChatGPT-managed Codex authentication can also be maintained on trusted persistent runners; if you use it, treat `~/.codex/auth.json` as a password and never commit or log it.
-
-This package does not read, upload, or manage your Codex credential itself.
-
-## Runner scope
-
-Repository-level runner:
-
-```text
-repo A -> repo A runner -> issue-worker -> Codex
-```
-
-Organization-level runner:
-
-```text
-repo A --\
-repo B ----> Organization runner -> issue-worker -> Codex
-repo C --/
-```
-
-The Action is the same in both cases. Only `runs-on` and the GitHub runner registration scope change.
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
 
 ## Documentation
 
@@ -265,15 +302,6 @@ The Action is the same in both cases. Only `runs-on` and the GitHub runner regis
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Security model](docs/SECURITY.md)
 - [Example caller workflow](examples/issue-worker.yml)
-
-## Upstream references
-
-- Codex CLI: https://developers.openai.com/codex/cli
-- Codex non-interactive mode: https://developers.openai.com/codex/non-interactive-mode
-- Codex security / approvals: https://developers.openai.com/codex/agent-approvals-security
-- ChatGPT-managed Codex auth in CI/CD: https://developers.openai.com/codex/auth/ci-cd-auth
-- GitHub self-hosted runners: https://docs.github.com/actions/hosting-your-own-runners
-- GitHub composite actions: https://docs.github.com/actions/sharing-automations/creating-actions/creating-a-composite-action
 
 ## License
 

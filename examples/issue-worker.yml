@@ -9,8 +9,6 @@ on:
   issues:
     types: [labeled]
 
-# One runner process accepts one job at a time, but repository-level concurrency
-# also prevents accidental duplicate runs for the same repository.
 concurrency:
   group: issue-worker-${{ github.repository }}
   cancel-in-progress: false
@@ -38,13 +36,42 @@ jobs:
           github-token: ${{ github.token }}
           issue-number: ${{ github.event.issue.number }}
 
-          # Optional examples:
+          # Optional project-specific preparation outside the Codex sandbox.
+          # Keep credentials out of literal workflow command text.
+          # setup-command: |
+          #   composer install --prefer-dist --no-interaction --no-progress
+          #   npm ci
+
+          # Optional verification after Codex and before commit/push/PR.
+          # verify-command: |
+          #   php artisan test
+          #   npm run build
+
+          # Other optional inputs:
           # base-branch: develop
           # codex-model: gpt-5.6-sol
           # codex-effort: high
           # allow-network: 'false'
-          # verify-command: './scripts/verify.sh'
+
+  # This job deliberately runs on a GitHub-hosted runner. If the self-hosted
+  # machine disappears after `codex:working` was applied, it can still recover
+  # the Issue state once GitHub concludes the implementation job.
+  cleanup-state:
+    needs: implement
+    if: always() && github.event.label.name == 'codex:run'
+    runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Recover stale issue-worker state
+        uses: qmore/issue-worker/cleanup@main
+        with:
+          github-token: ${{ github.token }}
+          issue-number: ${{ github.event.issue.number }}
+          job-result: ${{ needs.implement.result }}
 
 # Production recommendation:
-# Replace @main with a release tag (for example @v1) or, for maximum supply-chain
-# stability, a full commit SHA.
+# Replace @main in BOTH uses statements with the same release tag (for example @v1)
+# or, for maximum supply-chain stability, the same full commit SHA.

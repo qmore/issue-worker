@@ -15,7 +15,9 @@ jobs:
         with:
           fetch-depth: 2
       - name: Validate Bash syntax
-        run: bash -n scripts/issue-worker.sh
+        run: bash -n scripts/*.sh tests/*.sh
+      - name: Run helper tests
+        run: bash tests/test-helpers.sh
       - name: Check whitespace errors in latest change
         run: git diff-tree --check --root -r HEAD
 
@@ -23,5 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Parse action.yml as YAML
-        run: ruby -e 'require "yaml"; YAML.load_file("action.yml"); puts "action.yml OK"'
+      - name: Parse Action and example YAML
+        run: |
+          ruby -e 'require "yaml"; %w[action.yml cleanup/action.yml examples/issue-worker.yml].each { |f| YAML.load_file(f); puts "#{f} OK" }'
