@@ -4,23 +4,27 @@ Worker machines should install prebuilt binaries. Go is a development/CI depende
 
 ## Publish a release
 
-From an up-to-date `main` branch:
+`VERSION` is the release source of truth.
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
+To publish a new release, change `VERSION` in a normal pull request, for example:
+
+```text
+v0.1.1
 ```
 
-Tags matching `v*` trigger `.github/workflows/release.yml`.
+When that change is merged to `main`, `.github/workflows/release.yml` runs automatically. No maintainer needs to build locally or manually create a tag.
 
 The release workflow:
 
-1. builds static binaries for Apple Silicon Mac, Intel Mac, Linux arm64, and Linux x86_64
-2. embeds the tag into `issue-worker version`
-3. packages each binary with the license
-4. generates `SHA256SUMS`
-5. verifies the Linux x86_64 binary and all checksums
-6. publishes all archives and checksums to GitHub Releases
+1. validates the version string
+2. refuses to overwrite an existing release
+3. builds static binaries for Apple Silicon Mac, Intel Mac, Linux arm64, and Linux x86_64
+4. embeds `VERSION` into `issue-worker version`
+5. packages each binary with the license
+6. generates `SHA256SUMS`
+7. verifies the Linux x86_64 binary and all checksums
+8. creates the Git tag and GitHub Release at the merged commit
+9. uploads all archives and checksums
 
 Published asset names are:
 
