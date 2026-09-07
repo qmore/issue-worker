@@ -1,0 +1,102 @@
+name: Release binaries
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.x'
+          cache: false
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            printf 'error: VERSION must look like v0.1.0, got %q\n' "$VERSION" >&2
+            exit 1
+          fi
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+
+      - name: Refuse duplicate release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            printf 'error: release %s already exists\n' "$VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+
+          build_target() {
+            goos="$1"
+            goarch="$2"
+            label="$3"
+            stage="$(mktemp -d)"
+
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build \
+                -trimpath \
+                -ldflags="-s -w -X main.version=${VERSION}" \
+                -o "$stage/issue-worker" \
+                ./cmd/issue-worker
+
+            cp LICENSE "$stage/LICENSE"
+            tar -C "$stage" -czf "dist/issue-worker_${label}.tar.gz" issue-worker LICENSE
+            rm -rf "$stage"
+          }
+
+          build_target darwin arm64 Darwin_arm64
+          build_target darwin amd64 Darwin_x86_64
+          build_target linux arm64 Linux_arm64
+          build_target linux amd64 Linux_x86_64
+
+          (
+            cd dist
+            sha256sum issue-worker_*.tar.gz > SHA256SUMS
+          )
+
+      - name: Verify release binaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p verify
+          tar -C verify -xzf dist/issue-worker_Linux_x86_64.tar.gz
+          test "$(verify/issue-worker version)" = "$VERSION"
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh release create "$VERSION" \
+            dist/issue-worker_*.tar.gz \
+            dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --generate-notes

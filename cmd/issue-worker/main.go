@@ -19,7 +19,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.0-dev"
+var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {

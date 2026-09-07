@@ -16,6 +16,7 @@ Codex CLI -> verify -> branch -> PR
 ```
 
 Do **not** register a GitHub self-hosted runner for this mode.
+Do **not** install Go on the worker machine just to run issue-worker.
 
 ## Safety invariants
 
@@ -29,6 +30,7 @@ The setup agent must follow all of these rules:
 6. Do not use Codex sandbox-bypass flags.
 7. Do not configure multiple daemons against the same repository in the MVP; distributed locking is not implemented yet.
 8. Do not install a launchd service unless service support is explicitly present in the current issue-worker version. The MVP runs in the foreground.
+9. Prefer the prebuilt release binary. Do not install a Go toolchain solely to build issue-worker on the worker machine.
 
 ## 1. Check the machine
 
@@ -46,22 +48,23 @@ Check:
 ```bash
 uname -a
 git --version
-go version
 codex --version
+curl --version
 ```
 
-If Go is not installed, install a current supported Go toolchain before building the prototype. Do not introduce Python/Node runtimes solely for issue-worker.
+`issue-worker` itself has no runtime dependency on Go, Python, Node.js, Docker, or GitHub CLI.
 
-## 2. Obtain issue-worker
+## 2. Install issue-worker
 
-Until release binaries/Homebrew packaging exist:
+Use the prebuilt GitHub Release binary:
 
 ```bash
-git clone https://github.com/qmore/issue-worker.git
-cd issue-worker
-git switch feat/daemon-mvp
-./scripts/install-daemon.sh
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh | sh
 ```
+
+The installer detects the local platform, downloads the matching release archive and `SHA256SUMS`, verifies the archive, and installs only the `issue-worker` binary to `~/.local/bin` by default.
+
+Do not replace this with a source build unless the user explicitly wants a development environment.
 
 If `~/.local/bin` is not on PATH, follow the installer's printed PATH instruction.
 
@@ -69,6 +72,13 @@ Verify:
 
 ```bash
 issue-worker version
+```
+
+A specific release can be selected without installing Go:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh \
+  | ISSUE_WORKER_VERSION=v0.1.0 sh
 ```
 
 ## 3. Initialize local configuration
@@ -264,12 +274,21 @@ Do not claim features that are not implemented yet:
 
 The MVP's job claim is designed only for one daemon with `concurrency: 1`.
 
-## 12. Success criteria
+## 12. Release/development boundary
+
+Worker machines should use prebuilt binaries.
+
+The Go toolchain belongs only on development/CI machines. Version tags (`v*`) trigger `.github/workflows/release.yml`, which cross-compiles release archives, creates checksums, verifies them, and publishes a GitHub Release.
+
+Do not install Go on a clean worker Mac merely because the repository itself is written in Go.
+
+## 13. Success criteria
 
 Setup is complete when all of the following are true:
 
 ```text
-issue-worker runs locally
+issue-worker runs locally from a prebuilt binary
+Go is not required on the worker
 configured private repo is accessible
 no self-hosted runner is registered
 no inbound port is open

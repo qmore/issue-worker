@@ -25,9 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Parse Action and example YAML
+      - name: Parse Action, workflow, and example YAML
         run: |
-          ruby -e 'require "yaml"; %w[action.yml cleanup/action.yml examples/issue-worker.yml examples/daemon-config.yml examples/repository.issue-worker.yml].each { |f| YAML.load_file(f); puts "#{f} OK" }'
+          ruby -e 'require "yaml"; %w[action.yml cleanup/action.yml .github/workflows/release.yml examples/issue-worker.yml examples/daemon-config.yml examples/repository.issue-worker.yml].each { |f| YAML.load_file(f); puts "#{f} OK" }'
 
   daemon-go:
     strategy:

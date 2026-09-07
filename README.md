@@ -2,7 +2,7 @@
 
 Turn a trusted GitHub Issue into a local Codex implementation job and return the result as a Pull Request.
 
-> **Status:** experimental. The new standalone daemon is the preferred prototype path and is currently being validated. The existing GitHub Actions / self-hosted runner mode remains in this repository as an alternative implementation.
+> **Status:** experimental MVP. The standalone daemon is the preferred path. The existing GitHub Actions / self-hosted runner mode remains in this repository as an alternative implementation.
 
 ## Standalone daemon
 
@@ -24,14 +24,14 @@ issue-worker daemon on your Mac
 Pull Request + Issue status
 ```
 
-No GitHub self-hosted runner registration is required. No inbound port, webhook endpoint, `gh` CLI, or repository Actions workflow is required for daemon mode.
+No GitHub self-hosted runner registration is required. No inbound port, webhook endpoint, `gh` CLI, repository Actions workflow, or Go toolchain is required on the worker machine.
 
 ### MVP scope
 
 The current prototype intentionally stays small:
 
 - macOS-first
-- Go single binary
+- standalone Go binary
 - explicit private-repository allowlist
 - Fine-grained PAT stored in macOS Keychain
 - 30-second polling by default
@@ -44,27 +44,52 @@ The current prototype intentionally stays small:
 - optional trusted verification after Codex
 - wrapper-owned commit, push, PR, labels, and Issue comments
 
-Multi-worker distributed locking, GitHub App login, launchd installation, Homebrew packaging, cancellation, and restart recovery are intentionally deferred until the basic flow has been exercised end-to-end.
+Multi-worker distributed locking, GitHub App login, launchd installation, Homebrew packaging, cancellation, and restart recovery are intentionally deferred.
 
-## Prototype installation
+## Install
 
-Until release binaries/Homebrew packaging exist:
+The recommended worker installation uses a prebuilt GitHub Release binary. **Go is not installed or required on the worker machine.**
+
+On Apple Silicon macOS:
 
 ```bash
-git clone https://github.com/qmore/issue-worker.git
-cd issue-worker
-git switch feat/daemon-mvp
-./scripts/install-daemon.sh
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh | sh
 ```
 
-Runtime requirements:
+The installer:
+
+- detects the operating system and CPU architecture
+- downloads the matching release archive
+- downloads `SHA256SUMS`
+- verifies the archive checksum
+- installs only `issue-worker` to `~/.local/bin`
+- does not use `sudo`
+- does not install Go or any issue-worker-specific runtime
+
+Supported release targets:
+
+```text
+Darwin arm64   (Apple Silicon Mac)
+Darwin x86_64  (Intel Mac)
+Linux arm64
+Linux x86_64
+```
+
+To install a specific release rather than the latest:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh \
+  | ISSUE_WORKER_VERSION=v0.1.0 sh
+```
+
+Runtime requirements on the worker are only:
 
 ```text
 git
 codex
 ```
 
-Go is currently required only to build the prototype installer. It will not be a runtime dependency once release binaries are published.
+`curl`, `tar`, and `shasum` are used only by the installer and are standard on macOS.
 
 ### 1. Initialize
 
@@ -145,7 +170,7 @@ Single diagnostic poll:
 issue-worker poll
 ```
 
-The prototype intentionally does not install a background service yet.
+The MVP intentionally does not install a background service yet.
 
 ## Submit a job
 
@@ -242,6 +267,18 @@ Detailed prototype design: [`docs/DAEMON_MVP.md`](docs/DAEMON_MVP.md)
 
 LLM-oriented installation guide: [`docs/LLM_DAEMON_SETUP.md`](docs/LLM_DAEMON_SETUP.md)
 
+## Releases
+
+`VERSION` is the release source of truth. To publish a new version, update `VERSION` in a normal pull request, for example:
+
+```text
+v0.1.1
+```
+
+When that change reaches `main`, `.github/workflows/release.yml` automatically cross-compiles the four supported targets, embeds the version into `issue-worker version`, creates `SHA256SUMS`, verifies the release output, creates the Git tag and GitHub Release, and uploads the archives.
+
+The Go toolchain therefore exists only in development/CI, not on worker machines. See [`docs/RELEASING.md`](docs/RELEASING.md).
+
 ## Existing GitHub Actions mode
 
 The original Composite Action implementation is still available while the standalone daemon is validated. It uses:
@@ -260,11 +297,11 @@ Existing-mode documentation:
 - [`docs/SECURITY.md`](docs/SECURITY.md)
 - [`examples/issue-worker.yml`](examples/issue-worker.yml)
 
-The goal of the daemon experiment is specifically to remove the installation overhead of runner registration and caller workflows, not to delete the working Actions implementation before the new path is proven.
+The goal of the daemon path is specifically to remove the installation overhead of runner registration and caller workflows, not to delete the working Actions implementation before the new path is proven.
 
 ## Development
 
-The daemon is written in Go.
+Go is a development/CI dependency only.
 
 ```bash
 go test ./...
@@ -272,7 +309,15 @@ go vet ./...
 go build ./cmd/issue-worker
 ```
 
-CI runs these checks on both macOS and Linux in addition to the existing Composite Action tests.
+For a local source build installer:
+
+```bash
+./scripts/install-daemon.sh
+```
+
+Normal worker setup should use the prebuilt release installer instead.
+
+CI runs daemon checks on both macOS and Linux in addition to the existing Composite Action tests.
 
 ## License
 
