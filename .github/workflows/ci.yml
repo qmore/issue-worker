@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell-syntax:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate Bash syntax
+        run: bash -n scripts/issue-worker.sh
+      - name: Check whitespace errors
+        run: git diff --check HEAD~0
+
+  action-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Parse action.yml as YAML
+        run: ruby -e 'require "yaml"; YAML.load_file("action.yml"); puts "action.yml OK"'
