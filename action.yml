@@ -99,4 +99,4 @@ runs:
         ISSUE_WORKER_CODEX_MODEL: ${{ inputs.codex-model }}
         ISSUE_WORKER_CODEX_EFFORT: ${{ inputs.codex-effort }}
         ISSUE_WORKER_ALLOW_NETWORK: ${{ inputs.allow-network }}
-      run: "$GITHUB_ACTION_PATH/scripts/issue-worker.sh"
+      run: bash "$GITHUB_ACTION_PATH/scripts/issue-worker.sh"
