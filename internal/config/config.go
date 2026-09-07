@@ -45,9 +45,12 @@ type Workspace struct {
 }
 
 type Codex struct {
-	Model        string `yaml:"model"`
-	Effort       string `yaml:"effort"`
-	AllowNetwork bool   `yaml:"allow_network"`
+	Backend         string `yaml:"backend"`
+	AppServerSocket string `yaml:"app_server_socket"`
+	Timeout         string `yaml:"timeout"`
+	Model           string `yaml:"model"`
+	Effort          string `yaml:"effort"`
+	AllowNetwork    bool   `yaml:"allow_network"`
 }
 
 type RepoConfig struct {
@@ -104,6 +107,12 @@ func LoadRepo(path string) (RepoConfig, error) {
 }
 
 func (c *Config) applyDefaults() {
+	if c.Codex.Backend == "" {
+		c.Codex.Backend = "exec"
+	}
+	if c.Codex.Timeout == "" {
+		c.Codex.Timeout = "30m"
+	}
 	if c.Version == 0 {
 		c.Version = 1
 	}
@@ -145,6 +154,12 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
+	if c.Codex.Backend != "exec" && c.Codex.Backend != "app-server" {
+		return fmt.Errorf("invalid codex.backend %q", c.Codex.Backend)
+	}
+	if d, err := time.ParseDuration(c.Codex.Timeout); err != nil || d <= 0 {
+		return fmt.Errorf("invalid codex.timeout %q", c.Codex.Timeout)
+	}
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
 	}
@@ -194,6 +209,9 @@ workspace:
   root: ""
 
 codex:
+  backend: exec
+  app_server_socket: ""
+  timeout: 30m
   model: ""
   effort: ""
   allow_network: false

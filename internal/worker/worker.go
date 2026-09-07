@@ -91,6 +91,24 @@ func (w *Worker) PollOnce(ctx context.Context) error {
 
 func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retErr error) {
 	stage := "claim"
+	var app *appSession
+	setStage := func(value string) {
+		stage = value
+		w.log.Printf("%s#%d stage=%s", repo, issue.Number, stage)
+		if app != nil {
+			app.status(stage)
+		}
+	}
+	defer func() {
+		if app != nil {
+			if retErr != nil {
+				app.status("failed: " + stage)
+			} else {
+				app.status(stage)
+			}
+			app.close()
+		}
+	}()
 	claimed := false
 	defer func() {
 		if retErr != nil && claimed {
@@ -106,7 +124,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	}
 	claimed = true
 
-	stage = "repository"
+	setStage("repository")
 	repository, err := w.gh.GetRepository(ctx, repo)
 	if err != nil {
 		return err
@@ -128,7 +146,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	}
 	w.log.Printf("claimed %s#%d -> %s", repo, issue.Number, branch)
 
-	stage = "configuration"
+	setStage("configuration")
 	repoCfg, err := config.LoadRepo(filepath.Join(jobDir, ".issue-worker.yml"))
 	if err != nil {
 		return fmt.Errorf("load .issue-worker.yml: %w", err)
@@ -148,20 +166,26 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	setupCommands := append([]string(nil), repoCfg.Setup...)
 	verifyCommands := append([]string(nil), repoCfg.Verify...)
 
-	stage = "setup"
+	if w.cfg.Codex.Backend == "app-server" {
+		app, err = w.openAppSession(ctx, jobDir, repo, issue)
+		if err != nil {
+			return err
+		}
+	}
+	setStage("setup")
 	for _, command := range setupCommands {
 		if err := runShell(ctx, jobDir, command, inheritedSafeEnv()); err != nil {
 			return fmt.Errorf("setup command %q: %w", command, err)
 		}
 	}
 
-	stage = "codex"
-	lastMessage, err := w.runCodex(ctx, jobDir, branch, repo, issue)
+	setStage("codex")
+	lastMessage, err := w.runCodex(ctx, jobDir, branch, repo, issue, app)
 	if err != nil {
 		return err
 	}
 
-	stage = "verification"
+	setStage("verification")
 	verification := make([]verifyResult, 0, len(verifyCommands))
 	for _, command := range verifyCommands {
 		started := time.Now()
@@ -176,7 +200,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 		}
 	}
 
-	stage = "git"
+	setStage("git")
 	changed, err := gitChanged(ctx, jobDir)
 	if err != nil {
 		return err
@@ -185,6 +209,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 		if err := w.finishNoChange(ctx, repo, issue.Number); err != nil {
 			return err
 		}
+		setStage("no-change")
 		w.log.Printf("%s#%d completed without changes", repo, issue.Number)
 		return nil
 	}
@@ -196,7 +221,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 		return fmt.Errorf("push: %w", err)
 	}
 
-	stage = "pull-request"
+	setStage("pull-request")
 	prBody := buildPRBody(issue.Number, w.cfg.Worker.ID, lastMessage, verification)
 	pr, err := w.gh.CreatePR(
 		ctx,
@@ -217,6 +242,7 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 		pr.HTMLURL,
 		w.cfg.Worker.ID,
 	))
+	setStage("review")
 	w.log.Printf("%s#%d -> PR %s", repo, issue.Number, pr.HTMLURL)
 	return nil
 }
@@ -343,7 +369,7 @@ func (w *Worker) resetWorktreeBase(ctx context.Context, repo, jobDir, base strin
 	return nil
 }
 
-func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string, issue gh.Issue) (string, error) {
+func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string, issue gh.Issue, app *appSession) (string, error) {
 	configPath, err := gitConfigPath(ctx, dir)
 	if err != nil {
 		return "", err
@@ -364,16 +390,23 @@ func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string,
 	_ = lastFile.Close()
 	defer os.Remove(lastPath)
 
-	args := codexArgs(w.cfg.Codex, lastPath)
-
-	cmd := exec.CommandContext(ctx, "codex", args...)
-	cmd.Dir = dir
-	cmd.Env = codexEnv()
-	cmd.Stdin = strings.NewReader(buildPrompt(repo, issue))
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("codex exec: %w", err)
+	var lastMessage string
+	if app != nil {
+		lastMessage, err = app.run(ctx, "Begin implementation of the authorized GitHub Issue above.")
+	} else {
+		args := codexArgs(w.cfg.Codex, lastPath)
+		cmd := exec.CommandContext(ctx, "codex", args...)
+		cmd.Dir = dir
+		cmd.Env = codexEnv()
+		cmd.Stdin = strings.NewReader(buildPrompt(repo, issue))
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err = cmd.Run()
+		b, _ := os.ReadFile(lastPath)
+		lastMessage = strings.TrimSpace(string(b))
+	}
+	if err != nil {
+		return "", fmt.Errorf("codex: %w", err)
 	}
 
 	if err := os.WriteFile(configPath, originalConfig, 0600); err != nil {
@@ -387,8 +420,7 @@ func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string,
 		return "", fmt.Errorf("Codex changed git branch metadata: got %q want %q", strings.TrimSpace(branch), expectedBranch)
 	}
 
-	b, _ := os.ReadFile(lastPath)
-	return strings.TrimSpace(string(b)), nil
+	return lastMessage, nil
 }
 
 func buildPRBody(issue int, workerID, lastMessage string, verification []verifyResult) string {

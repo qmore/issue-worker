@@ -43,6 +43,7 @@ The current prototype intentionally stays small:
 - Codex `workspace-write` sandbox with minimized environment
 - optional trusted verification after Codex
 - wrapper-owned commit, push, PR, labels, and Issue comments
+- optional durable Codex tasks so work can be followed in Codex clients
 
 Multi-worker distributed locking, GitHub App login, launchd installation, Homebrew packaging, cancellation, and restart recovery are intentionally deferred.
 
@@ -155,6 +156,24 @@ issue-worker doctor
 ```
 
 This validates the local tools, GitHub credential, configured private repositories, workspace, and configuration.
+
+To make each Issue job visible as a durable task in Codex clients, set:
+
+```yaml
+codex:
+  backend: app-server
+  timeout: 30m
+```
+
+The task is named from the repository and Issue. Its title tracks the current
+wrapper stage (`setup`, `codex`, `verification`, `pull-request`, and the terminal
+state), while the full Codex turn contains command and file-change items.
+`backend: exec` remains the default and preserves terminal-only ephemeral runs.
+
+An empty `app_server_socket` starts Codex's stdio app-server for the job and
+writes to the normal Codex task history. Set a Unix socket path only when an
+existing shared app-server daemon is available. `issue-worker doctor` checks the
+selected app-server connection.
 
 ### 5. Start
 

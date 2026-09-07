@@ -115,6 +115,13 @@ The package invokes the local `codex` executable and reuses the runner's own Cod
 
 Treat Codex credentials as password-equivalent material.
 
+When the standalone daemon uses `codex.backend: app-server`, Issue text, Codex
+messages, commands, and file-change events are retained in the worker account's
+Codex task history. The GitHub PAT remains excluded from the app-server process
+environment and requests. The thread retains `workspace-write`, disabled network
+access by default, and non-interactive approvals. Timeout or transport failure
+triggers an explicit turn interruption before wrapper Git operations.
+
 Never:
 
 - commit them

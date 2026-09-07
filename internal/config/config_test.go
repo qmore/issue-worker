@@ -23,6 +23,24 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Worker.Concurrency != 1 || cfg.Labels.Ready != "codex:ready" {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
+	if cfg.Codex.Backend != "exec" || cfg.Codex.Timeout != "30m" {
+		t.Fatalf("unexpected codex defaults: %#v", cfg.Codex)
+	}
+}
+
+func TestLoadRejectsInvalidCodexSettings(t *testing.T) {
+	for _, content := range []string{
+		"version: 1\nrepositories: [owner/repo]\ncodex:\n  backend: other\n",
+		"version: 1\nrepositories: [owner/repo]\ncodex:\n  timeout: never\n",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yml")
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("Load accepted invalid config: %s", content)
+		}
+	}
 }
 
 func TestLoadRejectsConcurrencyAboveOne(t *testing.T) {

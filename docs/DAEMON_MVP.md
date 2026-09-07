@@ -155,6 +155,15 @@ codex login
 
 The worker does not manage or copy the Codex credential.
 
+## Codex task visibility
+
+The default `codex.backend: exec` preserves terminal-only ephemeral execution.
+Set `codex.backend: app-server` to create one durable, named Codex task per Issue.
+The task streams the full Codex turn and its title tracks the wrapper stage. The
+worker starts the stdio app-server unless `app_server_socket` selects an existing
+shared daemon. `codex.timeout` bounds the turn, and unfinished work is explicitly
+interrupted before wrapper-owned Git operations continue.
+
 ## Diagnose before running
 
 ```bash

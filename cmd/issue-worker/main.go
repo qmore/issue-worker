@@ -169,6 +169,15 @@ func cmdDoctor(args []string) error {
 		}
 	}
 
+	if cfg.Codex.Backend == "app-server" {
+		if err := worker.CheckAppServer(context.Background(), cfg.Codex); err != nil {
+			fmt.Printf("[FAIL] desktop app server: %v\n", err)
+			failed = true
+		} else {
+			fmt.Println("[OK] desktop app server")
+		}
+	}
+
 	token, err := auth.ReadGitHubToken()
 	if err != nil {
 		fmt.Printf("[FAIL] GitHub credential: %v\n", err)
