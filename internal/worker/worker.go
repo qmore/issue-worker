@@ -489,7 +489,7 @@ func gitConfigPath(ctx context.Context, dir string) (string, error) {
 }
 
 func (w *Worker) gitAuth(ctx context.Context, dir string, args ...string) error {
-	askpass, err := os.CreateTemp("", "issue-worker-askpass-*.sh")
+	taskpass, err := os.CreateTemp("", "issue-worker-askpass-*.sh")
 	if err != nil {
 		return err
 	}
