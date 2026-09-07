@@ -12,13 +12,13 @@ import (
 )
 
 type Config struct {
-	Version      int          `yaml:"version"`
-	Worker       Worker       `yaml:"worker"`
-	GitHub       GitHub       `yaml:"github"`
-	Repositories []string     `yaml:"repositories"`
-	Labels       Labels       `yaml:"labels"`
-	Workspace    Workspace    `yaml:"workspace"`
-	Codex        Codex        `yaml:"codex"`
+	Version      int       `yaml:"version"`
+	Worker       Worker    `yaml:"worker"`
+	GitHub       GitHub    `yaml:"github"`
+	Repositories []string  `yaml:"repositories"`
+	Labels       Labels    `yaml:"labels"`
+	Workspace    Workspace `yaml:"workspace"`
+	Codex        Codex     `yaml:"codex"`
 }
 
 type Worker struct {
