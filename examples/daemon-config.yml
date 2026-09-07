@@ -24,6 +24,13 @@ workspace:
   root: ""
 
 codex:
+  # app-server creates a durable task visible in Codex clients.
+  # exec keeps the existing terminal-only, ephemeral behavior.
+  backend: exec
+  # Optional socket for an existing shared app-server daemon. Empty starts a
+  # stdio app-server that writes to the normal Codex task history.
+  app_server_socket: ""
+  timeout: 30m
   model: ""
   effort: ""
   allow_network: false

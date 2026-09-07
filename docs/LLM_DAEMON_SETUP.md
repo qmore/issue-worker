@@ -150,6 +150,22 @@ codex login
 
 Never inspect, copy, print, or relocate Codex credential files.
 
+To expose issue-worker jobs in Codex clients, enable the durable app-server
+backend:
+
+```yaml
+codex:
+  backend: app-server
+  app_server_socket: ""
+  timeout: 30m
+  allow_network: false
+```
+
+Each Issue gets a named task containing the Codex turn, command activity, and
+file changes. The title shows the current wrapper stage. An empty socket uses the
+stdio app-server transport and normal Codex history. Configure a socket only
+when the machine already has a shared app-server daemon.
+
 ## 6. Run diagnostics
 
 Run:
