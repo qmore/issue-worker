@@ -304,7 +304,7 @@ func (w *Worker) prepareWorktree(ctx context.Context, repo, base, branch string,
 	}
 
 	if _, err := os.Stat(mirror); errors.Is(err, os.ErrNotExist) {
-		cloneURL := "https://github.com/" + repo + ".git"
+		cloneURL := githubCloneURL(repo)
 		if err := w.gitAuth(ctx, "", "clone", "--mirror", cloneURL, mirror); err != nil {
 			return "", fmt.Errorf("mirror clone: %w", err)
 		}
@@ -312,13 +312,14 @@ func (w *Worker) prepareWorktree(ctx context.Context, repo, base, branch string,
 		return "", err
 	}
 
-	if err := w.gitAuth(ctx, mirror, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
+	if err := w.gitAuth(ctx, mirror, fetchArgs(repo)...); err != nil {
 		return "", fmt.Errorf("mirror fetch: %w", err)
 	}
-	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "show-ref", "--verify", "refs/heads/"+base); err != nil {
+	baseRef := "refs/remotes/origin/" + base
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "show-ref", "--verify", baseRef); err != nil {
 		return "", fmt.Errorf("base branch %q not found: %w", base, err)
 	}
-	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "worktree", "add", "-b", branch, jobDir, base); err != nil {
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "worktree", "add", "-b", branch, jobDir, baseRef); err != nil {
 		return "", fmt.Errorf("worktree add: %w", err)
 	}
 	return jobDir, nil
@@ -326,13 +327,14 @@ func (w *Worker) prepareWorktree(ctx context.Context, repo, base, branch string,
 
 func (w *Worker) resetWorktreeBase(ctx context.Context, repo, jobDir, base string) error {
 	mirror := filepath.Join(expandHome(w.cfg.Workspace.Root), "repos", repoKey(repo)+".git")
-	if err := w.gitAuth(ctx, mirror, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
+	if err := w.gitAuth(ctx, mirror, fetchArgs(repo)...); err != nil {
 		return err
 	}
-	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "show-ref", "--verify", "refs/heads/"+base); err != nil {
+	baseRef := "refs/remotes/origin/" + base
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "show-ref", "--verify", baseRef); err != nil {
 		return fmt.Errorf("configured base branch %q not found: %w", base, err)
 	}
-	if _, err := run(ctx, jobDir, inheritedSafeEnv(), "git", "reset", "--hard", base); err != nil {
+	if _, err := run(ctx, jobDir, inheritedSafeEnv(), "git", "reset", "--hard", baseRef); err != nil {
 		return err
 	}
 	if _, err := run(ctx, jobDir, inheritedSafeEnv(), "git", "clean", "-fd"); err != nil {
@@ -362,23 +364,7 @@ func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string,
 	_ = lastFile.Close()
 	defer os.Remove(lastPath)
 
-	args := []string{
-		"exec",
-		"--sandbox", "workspace-write",
-		"--ask-for-approval", "never",
-		"--ephemeral",
-		"--output-last-message", lastPath,
-	}
-	if w.cfg.Codex.Model != "" {
-		args = append(args, "--model", w.cfg.Codex.Model)
-	}
-	if w.cfg.Codex.Effort != "" {
-		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", w.cfg.Codex.Effort))
-	}
-	if w.cfg.Codex.AllowNetwork {
-		args = append(args, "-c", "sandbox_workspace_write.network_access=true")
-	}
-	args = append(args, "-")
+	args := codexArgs(w.cfg.Codex, lastPath)
 
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Dir = dir
@@ -549,6 +535,34 @@ func commandString(name string, args []string) string {
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "`", "'")
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func githubCloneURL(repo string) string {
+	return "https://github.com/" + repo + ".git"
+}
+
+func fetchArgs(repo string) []string {
+	return []string{"fetch", "--prune", githubCloneURL(repo), "+refs/heads/*:refs/remotes/origin/*"}
+}
+
+func codexArgs(cfg config.Codex, lastPath string) []string {
+	args := []string{
+		"--ask-for-approval", "never",
+		"exec",
+		"--sandbox", "workspace-write",
+		"--ephemeral",
+		"--output-last-message", lastPath,
+	}
+	if cfg.Model != "" {
+		args = append(args, "--model", cfg.Model)
+	}
+	if cfg.Effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", cfg.Effort))
+	}
+	if cfg.AllowNetwork {
+		args = append(args, "-c", "sandbox_workspace_write.network_access=true")
+	}
+	return append(args, "-")
 }
 
 func inheritedSafeEnv() []string {

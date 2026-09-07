@@ -1,10 +1,12 @@
 package worker
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/qmore/issue-worker/internal/config"
 	gh "github.com/qmore/issue-worker/internal/github"
 )
 
@@ -24,5 +26,24 @@ func TestBuildPRBody(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestCodexArgsPlaceGlobalApprovalBeforeExec(t *testing.T) {
+	args := codexArgs(config.Codex{Model: "test-model", Effort: "high", AllowNetwork: true}, "/tmp/last.txt")
+	if len(args) < 3 || args[0] != "--ask-for-approval" || args[1] != "never" || args[2] != "exec" {
+		t.Fatalf("global approval flag must precede exec: %v", args)
+	}
+}
+
+func TestFetchArgsAvoidMirrorRemoteRefspec(t *testing.T) {
+	want := []string{
+		"fetch",
+		"--prune",
+		"https://github.com/owner/repo.git",
+		"+refs/heads/*:refs/remotes/origin/*",
+	}
+	if got := fetchArgs("owner/repo"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("fetch args = %v, want %v", got, want)
 	}
 }
