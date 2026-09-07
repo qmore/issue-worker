@@ -22,10 +22,10 @@ type Client struct {
 }
 
 type Issue struct {
-	Number      int     `json:"number"`
-	Title       string  `json:"title"`
-	Body        string  `json:"body"`
-	HTMLURL     string  `json:"html_url"`
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	HTMLURL     string    `json:"html_url"`
 	PullRequest *struct{} `json:"pull_request,omitempty"`
 	Labels      []struct {
 		Name string `json:"name"`
@@ -36,6 +36,7 @@ type Repository struct {
 	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
 	CloneURL      string `json:"clone_url"`
+	Private       bool   `json:"private"`
 }
 
 type PullRequest struct {
@@ -46,8 +47,8 @@ type PullRequest struct {
 func New(baseURL, token string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		token: token,
-		http: &http.Client{Timeout: 30 * time.Second},
+		token:   token,
+		http:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -159,13 +160,18 @@ func (c *Client) EnsureLabel(ctx context.Context, repo, name, color, description
 	if err == nil {
 		return nil
 	}
-	// Existing labels return 422. A PATCH updates description/color and is idempotent.
-	_, patchErr := c.do(ctx, http.MethodPatch, "/repos/"+repo+"/labels/"+url.PathEscape(name), "", map[string]string{"new_name": name, "color": color, "description": description}, nil)
+	// Existing labels return 422. PATCH makes the operation idempotent while still
+	// failing closed for insufficient permissions or invalid repositories.
+	_, patchErr := c.do(ctx, http.MethodPatch, "/repos/"+repo+"/labels/"+url.PathEscape(name), "", map[string]string{
+		"new_name":    name,
+		"color":       color,
+		"description": description,
+	}, nil)
 	return patchErr
 }
 
 func (c *Client) AddLabel(ctx context.Context, repo string, number int, label string) error {
-	_, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/labels", repo, number), "", map[string][]string{"labels": {label}}, nil)
+	_, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/labels", repo, number), "", map[string][]string{"labels": []string{label}}, nil)
 	return err
 }
 
