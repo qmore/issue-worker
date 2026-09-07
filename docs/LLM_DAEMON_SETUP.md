@@ -77,8 +77,8 @@ issue-worker version
 A specific release can be selected without installing Go:
 
 ```bash
-ISSUE_WORKER_VERSION=v0.1.0 \
-  curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/qmore/issue-worker/main/scripts/install.sh \
+  | ISSUE_WORKER_VERSION=v0.1.0 sh
 ```
 
 ## 3. Initialize local configuration
