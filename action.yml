@@ -41,8 +41,12 @@ inputs:
     description: Prefix for generated branches.
     required: false
     default: codex/issue-
+  setup-command:
+    description: Trusted shell command executed after checkout and before Codex. Runs outside the Codex sandbox.
+    required: false
+    default: ""
   verify-command:
-    description: Optional trusted shell command to run after Codex. Empty disables wrapper-side verification.
+    description: Optional trusted shell command to run after Codex and before commit/push/PR.
     required: false
     default: ""
   codex-model:
@@ -71,6 +75,9 @@ outputs:
   final-message:
     description: Final message returned by Codex.
     value: ${{ steps.worker.outputs.final-message }}
+  verification-result:
+    description: Result of the caller-supplied verification command (passed or skipped).
+    value: ${{ inputs.verify-command != '' && steps.worker.outputs.verification-result || 'skipped' }}
 
 runs:
   using: composite
@@ -81,6 +88,19 @@ runs:
         token: ${{ inputs.github-token }}
         fetch-depth: 0
         persist-credentials: false
+
+    - name: Run trusted setup command
+      if: ${{ inputs.setup-command != '' }}
+      shell: bash
+      env:
+        ISSUE_WORKER_GITHUB_TOKEN: ${{ inputs.github-token }}
+        ISSUE_WORKER_SETUP_COMMAND: ${{ inputs.setup-command }}
+        ISSUE_WORKER_ISSUE_NUMBER: ${{ inputs.issue-number }}
+        ISSUE_WORKER_TRIGGER_LABEL: ${{ inputs.trigger-label }}
+        ISSUE_WORKER_WORKING_LABEL: ${{ inputs.working-label }}
+        ISSUE_WORKER_REVIEW_LABEL: ${{ inputs.review-label }}
+        ISSUE_WORKER_FAILED_LABEL: ${{ inputs.failed-label }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/run-setup.sh"
 
     - name: Run Issue Worker
       id: worker
@@ -95,8 +115,19 @@ runs:
         ISSUE_WORKER_FAILED_LABEL: ${{ inputs.failed-label }}
         ISSUE_WORKER_NO_CHANGE_LABEL: ${{ inputs.no-change-label }}
         ISSUE_WORKER_BRANCH_PREFIX: ${{ inputs.branch-prefix }}
-        ISSUE_WORKER_VERIFY_COMMAND: ${{ inputs.verify-command }}
+        ISSUE_WORKER_VERIFY_COMMAND: ${{ inputs.verify-command != '' && 'bash "$GITHUB_ACTION_PATH/scripts/run-verification.sh"' || '' }}
+        ISSUE_WORKER_USER_VERIFY_COMMAND: ${{ inputs.verify-command }}
         ISSUE_WORKER_CODEX_MODEL: ${{ inputs.codex-model }}
         ISSUE_WORKER_CODEX_EFFORT: ${{ inputs.codex-effort }}
         ISSUE_WORKER_ALLOW_NETWORK: ${{ inputs.allow-network }}
       run: bash "$GITHUB_ACTION_PATH/scripts/issue-worker.sh"
+
+    - name: Add verification metadata to pull request
+      if: ${{ steps.worker.outputs.pr-url != '' }}
+      shell: bash
+      env:
+        ISSUE_WORKER_GITHUB_TOKEN: ${{ inputs.github-token }}
+        ISSUE_WORKER_PR_URL: ${{ steps.worker.outputs.pr-url }}
+        ISSUE_WORKER_VERIFY_COMMAND: ${{ inputs.verify-command }}
+        ISSUE_WORKER_VERIFICATION_RESULT: ${{ inputs.verify-command != '' && steps.worker.outputs.verification-result || 'skipped' }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/annotate-pr.sh"
