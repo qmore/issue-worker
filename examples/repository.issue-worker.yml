@@ -1,0 +1,17 @@
+# Copy to .issue-worker.yml in a target repository when project-specific
+# preparation or verification is required.
+
+# Optional. Empty means the repository default branch.
+base_branch: ""
+
+# Trusted commands run before Codex. Values are loaded and frozen before Codex
+# can edit this file.
+setup:
+  # - npm ci
+  # - composer install --prefer-dist --no-interaction --no-progress
+
+# Trusted worker-side verification after Codex. Values are also frozen before
+# Codex starts. These commands run outside the Codex sandbox under the worker user.
+verify:
+  # - go test ./...
+  # - npm test
