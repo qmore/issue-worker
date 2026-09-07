@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Parse Action and example YAML
         run: |
-          ruby -e 'require "yaml"; %w[action.yml cleanup/action.yml examples/issue-worker.yml].each { |f| YAML.load_file(f); puts "#{f} OK" }'
+          ruby -e 'require "yaml"; %w[action.yml cleanup/action.yml examples/issue-worker.yml examples/daemon-config.yml examples/repository.issue-worker.yml].each { |f| YAML.load_file(f); puts "#{f} OK" }'
 
   daemon-go:
     strategy:
@@ -40,8 +40,8 @@ jobs:
         with:
           go-version: '1.24.x'
           cache: false
-      - name: Download modules
-        run: go mod download
+      - name: Resolve modules
+        run: go mod tidy
       - name: Format workspace copy
         run: gofmt -w cmd internal
       - name: Test
@@ -54,7 +54,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: daemon-test-${{ matrix.os }}
-          path: daemon-test.log
+          path: |
+            daemon-test.log
+            go.sum
       - name: Vet
         run: go vet ./...
       - name: Build daemon
