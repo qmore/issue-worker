@@ -232,7 +232,9 @@ The daemon then watches its own `issue-worker/*` PRs. Trusted repository owners,
 members, and collaborators can opt another open same-repository PR in with
 `/issue-worker watch`, request an immediate change with `/issue-worker fix ...`,
 or pause it with `/issue-worker stop`. `@issue-worker` is an alias. Never enable
-this for untrusted public PR authors, and do not broaden it to fork PRs.
+this for untrusted public PR authors, and do not broaden it to fork PRs. During
+follow-up, host-side `setup` and `verify` commands are sourced from the PR base
+branch; never substitute the PR head's `.issue-worker.yml`.
 
 ## 8. Test polling without a job
 

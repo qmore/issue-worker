@@ -99,14 +99,18 @@ func Load(path string) (*Config, error) {
 }
 
 func LoadRepo(path string) (RepoConfig, error) {
-	var rc RepoConfig
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return rc, nil
+		return RepoConfig{}, nil
 	}
 	if err != nil {
-		return rc, err
+		return RepoConfig{}, err
 	}
+	return ParseRepo(b)
+}
+
+func ParseRepo(b []byte) (RepoConfig, error) {
+	var rc RepoConfig
 	if err := yaml.Unmarshal(b, &rc); err != nil {
 		return rc, err
 	}

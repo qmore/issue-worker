@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -93,6 +95,80 @@ func TestStopCommandPersistsUntilWatch(t *testing.T) {
 	}
 	if w.repoPRState("owner/repo").PullRequests["7"].Disabled {
 		t.Fatal("watch command did not re-enable the monitor")
+	}
+}
+
+func TestStopCommandRejectsOrdinaryIssue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/pulls/7" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		http.Error(rw, "not a pull request", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	w := &Worker{
+		cfg: &config.Config{PullRequests: config.PullRequests{Command: "/issue-worker"}},
+		gh:  gh.NewWithHTTP(server.URL, "token", server.Client()),
+		log: log.New(io.Discard, "", 0),
+		prState: &prMonitorState{Repositories: map[string]*repoPRMonitorState{
+			"owner/repo": {PullRequests: map[string]*trackedPR{}},
+		}},
+		prStateLoaded: true,
+	}
+	err := w.applyMonitorCommand(context.Background(), "owner/repo", 7, 1, false, "stop", "", gh.Comment{})
+	if err == nil {
+		t.Fatal("ordinary Issue was accepted as a pull request")
+	}
+	if _, exists := w.repoPRState("owner/repo").PullRequests["7"]; exists {
+		t.Fatal("failed stop command persisted a phantom pull request")
+	}
+}
+
+func TestLoadTrustedPRConfigIgnoresHeadVersion(t *testing.T) {
+	root := t.TempDir()
+	mirror := filepath.Join(root, "repos", "owner_repo.git")
+	if err := os.MkdirAll(filepath.Dir(mirror), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := run(ctx, "", inheritedSafeEnv(), "git", "init", mirror); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(mirror, ".issue-worker.yml")
+	if err := os.WriteFile(configPath, []byte("setup:\n  - trusted-setup\nverify:\n  - trusted-verify\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "add", ".issue-worker.yml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "trusted base"); err != nil {
+		t.Fatal(err)
+	}
+	baseSHA, err := output(ctx, mirror, inheritedSafeEnv(), "git", "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "update-ref", "refs/remotes/origin/main", strings.TrimSpace(baseSHA)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("setup:\n  - untrusted-head-command\nverify:\n  - untrusted-head-command\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "add", ".issue-worker.yml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, mirror, inheritedSafeEnv(), "git", "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "untrusted head"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &Worker{cfg: &config.Config{Workspace: config.Workspace{Root: root}}}
+	repoCfg, err := w.loadTrustedPRConfig(ctx, "owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(repoCfg.Setup, []string{"trusted-setup"}) || !reflect.DeepEqual(repoCfg.Verify, []string{"trusted-verify"}) {
+		t.Fatalf("loaded PR-head commands instead of trusted base: %#v", repoCfg)
 	}
 }
 

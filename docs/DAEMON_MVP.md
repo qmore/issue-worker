@@ -278,7 +278,9 @@ review comments, `CHANGES_REQUESTED`/commented review bodies, and the latest run
 for each GitHub Actions workflow on the current head SHA. A new actionable event
 creates a Codex follow-up task in the existing PR worktree (or a new detached
 worktree after restart), runs the frozen repository-local `setup` and `verify`
-commands, and pushes a wrapper-owned commit to the existing head branch.
+commands sourced from the PR base branch, and pushes a wrapper-owned commit to
+the existing head branch. The PR head's `.issue-worker.yml` is untrusted and is
+never used as the source of host-side commands.
 
 Only open PRs whose head repository exactly matches the configured repository
 are eligible. Fork PRs are rejected. Bot content and commands from other author

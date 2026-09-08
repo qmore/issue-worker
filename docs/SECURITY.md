@@ -81,6 +81,8 @@ Only open PRs whose head repository is the configured repository are eligible;
 fork PRs are rejected. `/issue-worker stop` is persisted until a later trusted
 `watch` or `fix` command. PR text, comments, reviews, and Actions metadata remain
 untrusted content inside the Codex prompt even after the trigger is authorized.
+The PR head's `.issue-worker.yml` is also untrusted: follow-up jobs source and
+freeze host-side `setup` and `verify` commands from the PR base branch instead.
 
 ## GitHub token handling
 

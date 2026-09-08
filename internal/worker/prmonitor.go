@@ -355,15 +355,6 @@ func (w *Worker) discoverPullRequests(ctx context.Context, repo string) error {
 func (w *Worker) applyMonitorCommand(ctx context.Context, repo string, number int, commentID int64, reviewComment bool, action, request string, comment gh.Comment) error {
 	rs := w.repoPRState(repo)
 	key := strconv.Itoa(number)
-	if action == "stop" {
-		tracked := rs.PullRequests[key]
-		if tracked == nil {
-			tracked = &trackedPR{Number: number}
-			rs.PullRequests[key] = tracked
-		}
-		tracked.Disabled = true
-		return nil
-	}
 	tracked := rs.PullRequests[key]
 	if tracked == nil {
 		pr, err := w.gh.GetPullRequest(ctx, repo, number)
@@ -375,6 +366,10 @@ func (w *Worker) applyMonitorCommand(ctx context.Context, repo string, number in
 		}
 		tracked = &trackedPR{Number: number, HeadRef: pr.Head.Ref, HeadSHA: pr.Head.SHA}
 		rs.PullRequests[key] = tracked
+	}
+	if action == "stop" {
+		tracked.Disabled = true
+		return nil
 	}
 	if action == "watch" {
 		tracked.Disabled = false
@@ -513,9 +508,11 @@ func (w *Worker) processPullRequestUpdate(ctx context.Context, repo string, pr g
 	if err != nil {
 		return "", err
 	}
-	repoCfg, err := config.LoadRepo(filepath.Join(jobDir, ".issue-worker.yml"))
+	// Host-side commands are trusted automation. Always source them from the PR
+	// base branch, never from the untrusted PR head that Codex can modify.
+	repoCfg, err := w.loadTrustedPRConfig(ctx, repo, pr.Base.Ref)
 	if err != nil {
-		return "", fmt.Errorf("load .issue-worker.yml: %w", err)
+		return "", fmt.Errorf("load trusted .issue-worker.yml: %w", err)
 	}
 	setupCommands := append([]string(nil), repoCfg.Setup...)
 	verifyCommands := append([]string(nil), repoCfg.Verify...)
@@ -561,6 +558,25 @@ func (w *Worker) processPullRequestUpdate(ctx context.Context, repo string, pr g
 	}
 	w.log.Printf("%s PR #%d updated to %s", repo, pr.Number, strings.TrimSpace(sha))
 	return strings.TrimSpace(sha), nil
+}
+
+func (w *Worker) loadTrustedPRConfig(ctx context.Context, repo, base string) (config.RepoConfig, error) {
+	if base == "" {
+		return config.RepoConfig{}, errors.New("pull request base branch is empty")
+	}
+	mirror := filepath.Join(expandHome(w.cfg.Workspace.Root), "repos", repoKey(repo)+".git")
+	baseRef := "refs/remotes/origin/" + base
+	if _, err := output(ctx, mirror, inheritedSafeEnv(), "git", "rev-parse", "--verify", baseRef+"^{commit}"); err != nil {
+		return config.RepoConfig{}, fmt.Errorf("trusted base branch %q not found: %w", base, err)
+	}
+	if _, err := output(ctx, mirror, inheritedSafeEnv(), "git", "cat-file", "-e", baseRef+":.issue-worker.yml"); err != nil {
+		return config.RepoConfig{}, nil
+	}
+	content, err := output(ctx, mirror, inheritedSafeEnv(), "git", "show", baseRef+":.issue-worker.yml")
+	if err != nil {
+		return config.RepoConfig{}, err
+	}
+	return config.ParseRepo([]byte(content))
 }
 
 func (w *Worker) preparePRWorktree(ctx context.Context, repo string, pr gh.PullRequest, tracked *trackedPR) (string, string, error) {

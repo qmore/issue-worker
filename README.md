@@ -252,7 +252,9 @@ by posting one of these commands in a PR conversation or inline review comment:
 `watch`. Watched PRs consume new conversation comments, inline review comments,
 review bodies, and failed GitHub Actions runs. issue-worker checks out the PR's
 existing head branch, runs Codex, reuses the repository's trusted `setup` and
-`verify` commands, then commits and pushes the focused update. Fork PRs, bot
+`verify` commands from the PR base branch, then commits and pushes the focused
+update. The PR head's `.issue-worker.yml` is never used for host-side commands.
+Fork PRs, bot
 comments, and commands from other author associations are ignored.
 
 The worker does not merge or deploy the PR. CI failure monitoring uses the
