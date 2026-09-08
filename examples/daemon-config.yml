@@ -34,3 +34,10 @@ codex:
   model: ""
   effort: ""
   allow_network: false
+
+# Optional follow-up loop for pull requests. issue-worker-created PRs are
+# watched automatically; another same-repository PR opts in by comment command.
+pull_requests:
+  monitor: false
+  command: /issue-worker
+  max_fix_attempts: 3

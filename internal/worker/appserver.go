@@ -189,6 +189,10 @@ func appThreadParams(cfg config.Codex, dir string) map[string]any {
 }
 
 func (w *Worker) openAppSession(ctx context.Context, dir, repo string, issue gh.Issue) (*appSession, error) {
+	return w.openAppSessionForPrompt(ctx, dir, appTaskTitle(repo, issue), buildPrompt(repo, issue))
+}
+
+func (w *Worker) openAppSessionForPrompt(ctx context.Context, dir, title, prompt string) (*appSession, error) {
 	s, err := connectApp(w.cfg.Codex, w.log)
 	if err != nil {
 		return nil, err
@@ -216,13 +220,13 @@ func (w *Worker) openAppSession(ctx context.Context, dir, repo string, issue gh.
 	if s.threadID == "" {
 		return nil, errors.New("app server returned no thread id")
 	}
-	s.title = appTaskTitle(repo, issue)
-	w.log.Printf("%s#%d desktop thread=%s worktree=%s", repo, issue.Number, s.threadID, dir)
+	s.title = title
+	w.log.Printf("%s desktop thread=%s worktree=%s", title, s.threadID, dir)
 	// The thread is durable in Codex; no GitHub credential or raw execution output
 	// is copied to its title or posted back to GitHub by this integration.
 	s.status("setup")
-	if err := s.persistIssue(ctx, buildPrompt(repo, issue)); err != nil {
-		return nil, fmt.Errorf("persist Issue in Codex task: %w", err)
+	if err := s.persistIssue(ctx, prompt); err != nil {
+		return nil, fmt.Errorf("persist task in Codex: %w", err)
 	}
 	ok = true
 	return s, nil

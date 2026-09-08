@@ -19,11 +19,13 @@ import (
 )
 
 type Worker struct {
-	cfg   *config.Config
-	gh    *gh.Client
-	token string
-	etags map[string]string
-	log   *log.Logger
+	cfg           *config.Config
+	gh            *gh.Client
+	token         string
+	etags         map[string]string
+	log           *log.Logger
+	prState       *prMonitorState
+	prStateLoaded bool
 }
 
 type verifyResult struct {
@@ -67,6 +69,15 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) PollOnce(ctx context.Context) error {
 	for _, repo := range w.cfg.Repositories {
+		if w.cfg.PullRequests.Monitor {
+			processed, err := w.pollPullRequests(ctx, repo)
+			if err != nil {
+				return fmt.Errorf("%s pull requests: %w", repo, err)
+			}
+			if processed {
+				return nil
+			}
+		}
 		issues, etag, notModified, err := w.gh.ListReadyIssues(ctx, repo, w.cfg.Labels.Ready, w.etags[repo])
 		if err != nil {
 			return fmt.Errorf("%s: %w", repo, err)
@@ -234,6 +245,14 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	if err != nil {
 		return err
 	}
+	if w.cfg.PullRequests.Monitor {
+		headSHA, shaErr := output(ctx, jobDir, inheritedSafeEnv(), "git", "rev-parse", "HEAD")
+		if shaErr != nil {
+			w.log.Printf("track PR %s#%d: %v", repo, pr.Number, shaErr)
+		} else if trackErr := w.trackCreatedPullRequest(repo, pr.Number, issue.Number, branch, strings.TrimSpace(headSHA), jobDir); trackErr != nil {
+			w.log.Printf("track PR %s#%d: %v", repo, pr.Number, trackErr)
+		}
+	}
 
 	_ = w.gh.RemoveLabel(ctx, repo, issue.Number, w.cfg.Labels.Running)
 	_ = w.gh.AddLabel(ctx, repo, issue.Number, w.cfg.Labels.Review)
@@ -370,6 +389,10 @@ func (w *Worker) resetWorktreeBase(ctx context.Context, repo, jobDir, base strin
 }
 
 func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string, issue gh.Issue, app *appSession) (string, error) {
+	return w.runCodexPrompt(ctx, dir, expectedBranch, buildPrompt(repo, issue), app)
+}
+
+func (w *Worker) runCodexPrompt(ctx context.Context, dir, expectedBranch, prompt string, app *appSession) (string, error) {
 	configPath, err := gitConfigPath(ctx, dir)
 	if err != nil {
 		return "", err
@@ -392,13 +415,13 @@ func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string,
 
 	var lastMessage string
 	if app != nil {
-		lastMessage, err = app.run(ctx, "Begin implementation of the authorized GitHub Issue above.")
+		lastMessage, err = app.run(ctx, "Begin the authorized implementation task above.")
 	} else {
 		args := codexArgs(w.cfg.Codex, lastPath)
 		cmd := exec.CommandContext(ctx, "codex", args...)
 		cmd.Dir = dir
 		cmd.Env = codexEnv()
-		cmd.Stdin = strings.NewReader(buildPrompt(repo, issue))
+		cmd.Stdin = strings.NewReader(prompt)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		err = cmd.Run()
@@ -490,6 +513,23 @@ func gitCommit(ctx context.Context, dir string, issue int) error {
 		"-c", "user.email=issue-worker@users.noreply.github.com",
 		"-c", "core.hooksPath=/dev/null",
 		"commit", "-m", fmt.Sprintf("Implement #%d via issue-worker", issue),
+	)
+	return err
+}
+
+func gitCommitPR(ctx context.Context, dir string, pr int) error {
+	if _, err := run(ctx, dir, inheritedSafeEnv(), "git", "add", "-A"); err != nil {
+		return err
+	}
+	_, err := run(
+		ctx,
+		dir,
+		inheritedSafeEnv(),
+		"git",
+		"-c", "user.name=issue-worker[bot]",
+		"-c", "user.email=issue-worker@users.noreply.github.com",
+		"-c", "core.hooksPath=/dev/null",
+		"commit", "-m", fmt.Sprintf("Address PR #%d feedback via issue-worker", pr),
 	)
 	return err
 }

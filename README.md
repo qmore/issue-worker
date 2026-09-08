@@ -44,6 +44,7 @@ The current prototype intentionally stays small:
 - optional trusted verification after Codex
 - wrapper-owned commit, push, PR, labels, and Issue comments
 - optional durable Codex tasks so work can be followed in Codex clients
+- optional PR feedback and failed Actions-run monitoring in the same polling loop
 
 Multi-worker distributed locking, GitHub App login, launchd installation, Homebrew packaging, cancellation, and restart recovery are intentionally deferred.
 
@@ -128,6 +129,7 @@ Create a Fine-grained PAT limited to the selected private repositories. Recommen
 Contents       Read and write
 Issues         Read and write
 Pull requests  Read and write
+Actions        Read-only (when PR monitoring is enabled)
 Metadata       Read-only (automatic)
 ```
 
@@ -225,6 +227,39 @@ Each execution gets a new branch similar to:
 issue-worker/123-20260907T150000000000000Z
 ```
 
+## Follow up on Pull Requests
+
+Enable the optional follow-up loop in the daemon configuration:
+
+```yaml
+pull_requests:
+  monitor: true
+  command: /issue-worker
+  max_fix_attempts: 3
+```
+
+PRs created by the daemon are watched automatically. A trusted repository
+`OWNER`, `MEMBER`, or `COLLABORATOR` can opt another open, same-repository PR in
+by posting one of these commands in a PR conversation or inline review comment:
+
+```text
+/issue-worker watch
+/issue-worker fix update the timeout handling
+/issue-worker stop
+```
+
+`@issue-worker` is accepted as an alias, and a bare `/issue-worker` means
+`watch`. Watched PRs consume new conversation comments, inline review comments,
+review bodies, and failed GitHub Actions runs. issue-worker checks out the PR's
+existing head branch, runs Codex, reuses the repository's trusted `setup` and
+`verify` commands, then commits and pushes the focused update. Fork PRs, bot
+comments, and commands from other author associations are ignored.
+
+The worker does not merge or deploy the PR. CI failure monitoring uses the
+Actions Runs API; it does not require the Checks permission. Without Fine-grained
+PAT `Actions: Read-only`, comment/review monitoring continues and CI status is
+reported as unavailable in the local log.
+
 ## Repository-local configuration
 
 Projects can optionally commit `.issue-worker.yml`:
@@ -254,7 +289,7 @@ Default interval:
 30s
 ```
 
-For each repository, the daemon remembers the response ETag and sends `If-None-Match` on later requests. The normal idle path is therefore:
+For Issue job discovery, the daemon remembers the response ETag and sends `If-None-Match` on later requests. The normal idle Issue path is therefore:
 
 ```text
 poll -> 304 Not Modified -> sleep -> poll
@@ -271,6 +306,8 @@ Important invariants:
 - only repositories explicitly listed in local configuration are considered
 - public target repositories are rejected by the MVP
 - the explicit `codex:ready` label is the approval boundary
+- PR follow-up commands are accepted only from trusted repository associations
+- only same-repository PR head branches can be modified; forks are rejected
 - the GitHub credential belongs to the wrapper, not the Codex process
 - the PAT is not put into repository files or prompts
 - Codex receives a minimized environment
