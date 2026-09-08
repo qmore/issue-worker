@@ -51,3 +51,36 @@ func TestListReadyIssuesUsesETagAndFiltersPRs(t *testing.T) {
 		t.Fatalf("expected 304, issues=%v", issues)
 	}
 }
+
+func TestPullRequestPollingUsesLatestCommentsAndHeadSHA(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/owner/repo/issues/comments":
+			if r.URL.Query().Get("direction") != "desc" || r.URL.Query().Get("per_page") != "100" {
+				t.Fatalf("comment query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`[]`))
+		case "/repos/owner/repo/actions/runs":
+			if r.URL.Query().Get("head_sha") != "abc123" || r.URL.Query().Get("per_page") != "100" {
+				t.Fatalf("workflow query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"workflow_runs":[{"id":1,"workflow_id":2,"run_attempt":3,"name":"CI"}]}`))
+		default:
+			http.Error(w, r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWithHTTP(server.URL, "token", server.Client())
+	if _, err := client.ListRepositoryIssueComments(context.Background(), "owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := client.ListWorkflowRuns(context.Background(), "owner/repo", "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].WorkflowID != 2 || runs[0].RunAttempt != 3 {
+		t.Fatalf("runs = %#v", runs)
+	}
+}

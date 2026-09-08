@@ -43,6 +43,8 @@ Implemented now:
 - verification after Codex
 - GitHub credential excluded from the Codex environment
 - wrapper-owned Git commit/push/PR operations
+- optional monitoring of PR feedback and failed GitHub Actions runs
+- persistent local PR monitoring cursors and retry state
 
 Not implemented in this MVP:
 
@@ -87,6 +89,7 @@ Recommended repository permissions for the MVP:
 Contents       Read and write
 Issues         Read and write
 Pull requests  Read and write
+Actions        Read-only (when PR monitoring is enabled)
 Metadata       Read-only (automatic)
 ```
 
@@ -137,6 +140,11 @@ worker:
 
 repositories:
   - owner/private-repo
+
+pull_requests:
+  monitor: true
+  command: /issue-worker
+  max_fix_attempts: 3
 ```
 
 The default workspace is:
@@ -247,6 +255,43 @@ codex:ready
 
 Failure becomes `codex:failed`. A successful run with no repository changes becomes `codex:no-change`.
 
+## Pull Request follow-up
+
+When `pull_requests.monitor` is enabled, PR discovery runs in the same polling
+loop as Issue discovery. PRs created on `issue-worker/*` branches are watched
+automatically. A trusted repository `OWNER`, `MEMBER`, or `COLLABORATOR` can opt
+another open same-repository PR in with a conversation or inline review comment:
+
+```text
+/issue-worker watch
+/issue-worker fix make the requested change
+/issue-worker stop
+```
+
+The configured command defaults to `/issue-worker`; `@issue-worker` is also
+accepted. A bare command means `watch`. `fix` both enables monitoring and submits
+an immediate request. `stop` remains in persistent state so automatic discovery
+does not re-enable that PR.
+
+For a watched PR, the daemon reads new trusted conversation comments, inline
+review comments, `CHANGES_REQUESTED`/commented review bodies, and the latest run
+for each GitHub Actions workflow on the current head SHA. A new actionable event
+creates a Codex follow-up task in the existing PR worktree (or a new detached
+worktree after restart), runs the frozen repository-local `setup` and `verify`
+commands sourced from the PR base branch, and pushes a wrapper-owned commit to
+the existing head branch. The PR head's `.issue-worker.yml` is untrusted and is
+never used as the source of host-side commands.
+
+Only open PRs whose head repository exactly matches the configured repository
+are eligible. Fork PRs are rejected. Bot content and commands from other author
+associations are ignored. The daemon never approves, merges, or deploys a PR.
+`max_fix_attempts` bounds retries for one unchanged event; the default is three.
+
+CI polling uses `GET /repos/{owner}/{repo}/actions/runs` and therefore needs
+Fine-grained PAT `Actions: Read-only`. It does not use the Checks API. If that
+endpoint is unavailable, the daemon logs the condition and continues monitoring
+comments and reviews.
+
 ## Workspace layout
 
 Conceptually:
@@ -255,6 +300,7 @@ Conceptually:
 data/
 ├── repos/
 │   └── owner_repo.git       # mirror
+├── pr-monitor-state.json    # watched PRs, event cursors, retry state
 └── jobs/
     └── owner_repo/
         └── 123-<run-id>/    # worktree
@@ -275,6 +321,8 @@ Failed worktrees are retained for local diagnosis in the MVP.
 The daemon is designed for trusted private repositories.
 
 - A job is started only from the explicit `codex:ready` label.
+- PR follow-ups require an issue-worker-owned branch or a trusted explicit command.
+- PR follow-up rejects forks and writes only to same-repository head branches.
 - The repository must be explicitly present in the local allowlist.
 - GitHub authentication is used by the wrapper, not Codex.
 - The Codex process receives a minimized environment and no GitHub PAT.
@@ -293,7 +341,7 @@ Default:
 30s
 ```
 
-The daemon stores one ETag per repository in memory. The normal idle sequence is therefore:
+The daemon stores one Issue-list ETag per repository in memory. The normal idle Issue sequence is therefore:
 
 ```text
 poll -> 304 -> sleep -> poll -> 304

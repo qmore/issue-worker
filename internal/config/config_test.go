@@ -26,12 +26,16 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Codex.Backend != "exec" || cfg.Codex.Timeout != "30m" {
 		t.Fatalf("unexpected codex defaults: %#v", cfg.Codex)
 	}
+	if cfg.PullRequests.Monitor || cfg.PullRequests.Command != "/issue-worker" || cfg.PullRequests.MaxFixAttempts != 3 {
+		t.Fatalf("unexpected pull request defaults: %#v", cfg.PullRequests)
+	}
 }
 
 func TestLoadRejectsInvalidCodexSettings(t *testing.T) {
 	for _, content := range []string{
 		"version: 1\nrepositories: [owner/repo]\ncodex:\n  backend: other\n",
 		"version: 1\nrepositories: [owner/repo]\ncodex:\n  timeout: never\n",
+		"version: 1\nrepositories: [owner/repo]\npull_requests:\n  max_fix_attempts: -1\n",
 	} {
 		path := filepath.Join(t.TempDir(), "config.yml")
 		if err := os.WriteFile(path, []byte(content), 0600); err != nil {

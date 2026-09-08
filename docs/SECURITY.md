@@ -71,6 +71,19 @@ For an `issues:labeled` event, `github.actor` is normally the user who applied t
 
 This check is defense in depth; the caller repository should still restrict who can manage labels and workflows.
 
+In standalone daemon mode, optional PR follow-up has a separate authorization
+boundary. PRs created on `issue-worker/*` branches are monitored automatically.
+Other PRs require `/issue-worker` or `@issue-worker` in a conversation or inline
+review comment authored with GitHub association `OWNER`, `MEMBER`, or
+`COLLABORATOR`. Commands from bots and all other associations are ignored.
+
+Only open PRs whose head repository is the configured repository are eligible;
+fork PRs are rejected. `/issue-worker stop` is persisted until a later trusted
+`watch` or `fix` command. PR text, comments, reviews, and Actions metadata remain
+untrusted content inside the Codex prompt even after the trigger is authorized.
+The PR head's `.issue-worker.yml` is also untrusted: follow-up jobs source and
+freeze host-side `setup` and `verify` commands from the PR base branch instead.
+
 ## GitHub token handling
 
 The caller normally passes:
@@ -187,6 +200,11 @@ The real boundaries are:
 
 Never rely on prompt text alone to protect secrets.
 
+PR CI monitoring reads the GitHub Actions Runs API with Fine-grained PAT
+`Actions: Read-only`. It does not need the Checks permission. If Actions access
+is denied, the daemon logs that CI status is unavailable and continues to
+process authorized comments and reviews.
+
 ## Trusted `setup-command`
 
 `setup-command` runs **outside the Codex sandbox**, after checkout and before Codex starts.
@@ -288,6 +306,9 @@ Also consider pinning other third-party Actions used by the caller workflow.
 ## Human review
 
 The worker opens a pull request; it does not merge it.
+
+PR follow-up may push additional wrapper-owned commits to an existing
+same-repository PR head branch. It never approves, merges, or deploys that PR.
 
 Recommended policy:
 

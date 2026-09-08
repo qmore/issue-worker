@@ -12,13 +12,14 @@ import (
 )
 
 type Config struct {
-	Version      int       `yaml:"version"`
-	Worker       Worker    `yaml:"worker"`
-	GitHub       GitHub    `yaml:"github"`
-	Repositories []string  `yaml:"repositories"`
-	Labels       Labels    `yaml:"labels"`
-	Workspace    Workspace `yaml:"workspace"`
-	Codex        Codex     `yaml:"codex"`
+	Version      int          `yaml:"version"`
+	Worker       Worker       `yaml:"worker"`
+	GitHub       GitHub       `yaml:"github"`
+	Repositories []string     `yaml:"repositories"`
+	Labels       Labels       `yaml:"labels"`
+	Workspace    Workspace    `yaml:"workspace"`
+	Codex        Codex        `yaml:"codex"`
+	PullRequests PullRequests `yaml:"pull_requests"`
 }
 
 type Worker struct {
@@ -51,6 +52,12 @@ type Codex struct {
 	Model           string `yaml:"model"`
 	Effort          string `yaml:"effort"`
 	AllowNetwork    bool   `yaml:"allow_network"`
+}
+
+type PullRequests struct {
+	Monitor        bool   `yaml:"monitor"`
+	Command        string `yaml:"command"`
+	MaxFixAttempts int    `yaml:"max_fix_attempts"`
 }
 
 type RepoConfig struct {
@@ -92,14 +99,18 @@ func Load(path string) (*Config, error) {
 }
 
 func LoadRepo(path string) (RepoConfig, error) {
-	var rc RepoConfig
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return rc, nil
+		return RepoConfig{}, nil
 	}
 	if err != nil {
-		return rc, err
+		return RepoConfig{}, err
 	}
+	return ParseRepo(b)
+}
+
+func ParseRepo(b []byte) (RepoConfig, error) {
+	var rc RepoConfig
 	if err := yaml.Unmarshal(b, &rc); err != nil {
 		return rc, err
 	}
@@ -112,6 +123,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Codex.Timeout == "" {
 		c.Codex.Timeout = "30m"
+	}
+	if c.PullRequests.Command == "" {
+		c.PullRequests.Command = "/issue-worker"
+	}
+	if c.PullRequests.MaxFixAttempts == 0 {
+		c.PullRequests.MaxFixAttempts = 3
 	}
 	if c.Version == 0 {
 		c.Version = 1
@@ -169,6 +186,9 @@ func (c *Config) validate() error {
 	if c.Worker.Concurrency != 1 {
 		return fmt.Errorf("daemon MVP supports worker.concurrency=1 only")
 	}
+	if c.PullRequests.MaxFixAttempts < 1 {
+		return fmt.Errorf("pull_requests.max_fix_attempts must be at least 1")
+	}
 	if len(c.Repositories) == 0 {
 		return fmt.Errorf("at least one repository must be configured")
 	}
@@ -215,5 +235,10 @@ codex:
   model: ""
   effort: ""
   allow_network: false
+
+pull_requests:
+  monitor: false
+  command: /issue-worker
+  max_fix_attempts: 3
 `
 }

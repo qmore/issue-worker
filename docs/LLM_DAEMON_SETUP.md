@@ -123,12 +123,17 @@ Guide the user in GitHub UI to create a token restricted to the selected private
 Contents       Read and write
 Issues         Read and write
 Pull requests  Read and write
+Actions        Read-only (when PR monitoring is enabled)
 Metadata       Read-only (automatic)
 ```
 
 Do not request Organization Administration or self-hosted runner Administration permissions.
 
 Do not ask the user to send the token to the LLM.
+
+The daemon uses the Actions Runs API for CI failure monitoring. Do not ask for a
+Checks permission when it is unavailable in the Fine-grained PAT UI. If PR
+monitoring is disabled, `Actions: Read-only` is not needed.
 
 Have the user enter it directly in the terminal:
 
@@ -214,6 +219,23 @@ Security behavior:
 
 Only configure commands appropriate for a trusted private repository.
 
+To follow up on review feedback and failed GitHub Actions runs, enable:
+
+```yaml
+pull_requests:
+  monitor: true
+  command: /issue-worker
+  max_fix_attempts: 3
+```
+
+The daemon then watches its own `issue-worker/*` PRs. Trusted repository owners,
+members, and collaborators can opt another open same-repository PR in with
+`/issue-worker watch`, request an immediate change with `/issue-worker fix ...`,
+or pause it with `/issue-worker stop`. `@issue-worker` is an alias. Never enable
+this for untrusted public PR authors, and do not broaden it to fork PRs. During
+follow-up, host-side `setup` and `verify` commands are sourced from the PR base
+branch; never substitute the PR head's `.issue-worker.yml`.
+
 ## 8. Test polling without a job
 
 Run one poll:
@@ -276,6 +298,11 @@ issue-worker/<issue-number>-<run-id>
 If Codex makes no changes, expect `codex:no-change`.
 If the worker fails after claiming the Issue, expect `codex:failed` and inspect the local worker log/terminal output.
 
+When PR monitoring is enabled, add a harmless trusted comment to the generated
+PR and confirm that a follow-up Codex task runs, verification passes, and a new
+commit is pushed to the same PR. `/issue-worker stop` should prevent later
+comments from triggering work until `/issue-worker watch` is posted.
+
 ## 11. Important MVP limits
 
 Do not claim features that are not implemented yet:
@@ -287,6 +314,9 @@ Do not claim features that are not implemented yet:
 - no parallel jobs yet
 - no cancel label yet
 - no robust restart recovery yet
+
+PR monitor cursors survive daemon restart, but Issue job execution itself still
+does not have robust restart recovery.
 
 The MVP's job claim is designed only for one daemon with `concurrency: 1`.
 
@@ -316,4 +346,5 @@ verification passes (if configured)
 branch is pushed
 PR is created
 Issue reaches codex:review
+trusted PR feedback can update the same PR when monitoring is enabled
 ```
