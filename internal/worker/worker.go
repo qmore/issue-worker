@@ -34,6 +34,8 @@ type verifyResult struct {
 	Duration time.Duration
 }
 
+const workerStatusMarker = "<!-- issue-worker:host-verification -->"
+
 func New(cfg *config.Config, client *gh.Client, token string, logger *log.Logger) *Worker {
 	if logger == nil {
 		logger = log.New(os.Stdout, "", log.LstdFlags)
@@ -177,8 +179,9 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	setupCommands := append([]string(nil), repoCfg.Setup...)
 	verifyCommands := append([]string(nil), repoCfg.Verify...)
 
+	hasHostVerification := len(verifyCommands) > 0
 	if w.cfg.Codex.Backend == "app-server" {
-		app, err = w.openAppSession(ctx, jobDir, repo, issue)
+		app, err = w.openAppSession(ctx, jobDir, repo, issue, hasHostVerification)
 		if err != nil {
 			return err
 		}
@@ -191,24 +194,16 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	}
 
 	setStage("codex")
-	lastMessage, err := w.runCodex(ctx, jobDir, branch, repo, issue, app)
+	lastMessage, err := w.runCodex(ctx, jobDir, branch, repo, issue, hasHostVerification, app)
 	if err != nil {
 		return err
 	}
 
 	setStage("verification")
-	verification := make([]verifyResult, 0, len(verifyCommands))
-	for _, command := range verifyCommands {
-		started := time.Now()
-		err := runShell(ctx, jobDir, command, inheritedSafeEnv())
-		verification = append(verification, verifyResult{
-			Command:  command,
-			Passed:   err == nil,
-			Duration: time.Since(started),
-		})
-		if err != nil {
-			return fmt.Errorf("verification command %q: %w", command, err)
-		}
+	verification, err := runVerification(ctx, jobDir, verifyCommands)
+	if err != nil {
+		w.reportApp(app, buildHostVerificationMessage(verification, "The job stopped before commit, push, or pull request creation."))
+		return err
 	}
 
 	setStage("git")
@@ -217,9 +212,10 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 		return err
 	}
 	if !changed {
-		if err := w.finishNoChange(ctx, repo, issue.Number); err != nil {
+		if err := w.finishNoChange(ctx, repo, issue.Number, verification); err != nil {
 			return err
 		}
+		w.reportApp(app, buildHostVerificationMessage(verification, "No repository changes were required."))
 		setStage("no-change")
 		w.log.Printf("%s#%d completed without changes", repo, issue.Number)
 		return nil
@@ -257,10 +253,12 @@ func (w *Worker) process(ctx context.Context, repo string, issue gh.Issue) (retE
 	_ = w.gh.RemoveLabel(ctx, repo, issue.Number, w.cfg.Labels.Running)
 	_ = w.gh.AddLabel(ctx, repo, issue.Number, w.cfg.Labels.Review)
 	_ = w.gh.Comment(ctx, repo, issue.Number, fmt.Sprintf(
-		"Implementation completed and is ready for review.\n\nPR: %s\nWorker: `%s`",
+		"Implementation completed and is ready for review.\n\nPR: %s\nWorker: `%s`\n\n%s",
 		pr.HTMLURL,
 		w.cfg.Worker.ID,
+		buildHostVerificationMessage(verification, ""),
 	))
+	w.reportApp(app, buildHostVerificationMessage(verification, "Pull request: "+pr.HTMLURL))
 	setStage("review")
 	w.log.Printf("%s#%d -> PR %s", repo, issue.Number, pr.HTMLURL)
 	return nil
@@ -322,14 +320,15 @@ func (w *Worker) failJob(ctx context.Context, repo string, number int, stage str
 	w.log.Printf("failure detail %s#%d stage=%s: %v", repo, number, stage, cause)
 }
 
-func (w *Worker) finishNoChange(ctx context.Context, repo string, number int) error {
+func (w *Worker) finishNoChange(ctx context.Context, repo string, number int, verification []verifyResult) error {
 	_ = w.gh.RemoveLabel(ctx, repo, number, w.cfg.Labels.Running)
 	if err := w.gh.AddLabel(ctx, repo, number, w.cfg.Labels.NoChange); err != nil {
 		return err
 	}
 	return w.gh.Comment(ctx, repo, number, fmt.Sprintf(
-		"issue-worker completed without repository changes.\n\nWorker: `%s`",
+		"issue-worker completed without repository changes.\n\nWorker: `%s`\n\n%s",
 		w.cfg.Worker.ID,
+		buildHostVerificationMessage(verification, ""),
 	))
 }
 
@@ -388,8 +387,8 @@ func (w *Worker) resetWorktreeBase(ctx context.Context, repo, jobDir, base strin
 	return nil
 }
 
-func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string, issue gh.Issue, app *appSession) (string, error) {
-	return w.runCodexPrompt(ctx, dir, expectedBranch, buildPrompt(repo, issue), app)
+func (w *Worker) runCodex(ctx context.Context, dir, expectedBranch, repo string, issue gh.Issue, hasHostVerification bool, app *appSession) (string, error) {
+	return w.runCodexPrompt(ctx, dir, expectedBranch, buildPrompt(repo, issue, hasHostVerification), app)
 }
 
 func (w *Worker) runCodexPrompt(ctx context.Context, dir, expectedBranch, prompt string, app *appSession) (string, error) {
@@ -472,8 +471,8 @@ func buildPRBody(issue int, workerID, lastMessage string, verification []verifyR
 	return b.String()
 }
 
-func buildPrompt(repo string, issue gh.Issue) string {
-	return fmt.Sprintf(`You are running as an automated implementation worker inside a trusted private Git repository.
+func buildPrompt(repo string, issue gh.Issue, hasHostVerification bool) string {
+	prompt := fmt.Sprintf(`You are running as an automated implementation worker inside a trusted private Git repository.
 
 Implement the GitHub Issue supplied below.
 
@@ -493,6 +492,80 @@ Title: %s
 %s
 --- END UNTRUSTED ISSUE CONTENT ---
 `, repo, issue.Number, issue.Title, issue.Body)
+	return addHostVerificationGuidance(prompt, hasHostVerification)
+}
+
+func addHostVerificationGuidance(prompt string, enabled bool) string {
+	if !enabled {
+		return prompt
+	}
+	return strings.Replace(prompt, "\n--- BEGIN UNTRUSTED", `
+7. Trusted host-side verification is configured. issue-worker runs it after this Codex turn and posts the authoritative result. Run checks that are safely available inside the sandbox, but if host-only runtimes or sockets are unavailable, describe host verification as pending instead of calling the implementation incomplete.
+
+--- BEGIN UNTRUSTED`, 1)
+}
+
+func runVerification(ctx context.Context, dir string, commands []string) ([]verifyResult, error) {
+	verification := make([]verifyResult, 0, len(commands))
+	for _, command := range commands {
+		started := time.Now()
+		err := runShell(ctx, dir, command, inheritedSafeEnv())
+		verification = append(verification, verifyResult{
+			Command:  command,
+			Passed:   err == nil,
+			Duration: time.Since(started),
+		})
+		if err != nil {
+			return verification, fmt.Errorf("verification command %q: %w", command, err)
+		}
+	}
+	return verification, nil
+}
+
+func buildHostVerificationMessage(verification []verifyResult, detail string) string {
+	if len(verification) == 0 {
+		return "Host verification: skipped (no commands configured)."
+	}
+	passed := true
+	var b strings.Builder
+	b.WriteString("issue-worker host verification completed.\n\n")
+	for _, result := range verification {
+		mark := "✅"
+		if !result.Passed {
+			mark = "❌"
+			passed = false
+		}
+		fmt.Fprintf(&b, "- %s `%s` (%s)\n", mark, oneLine(result.Command), result.Duration.Round(time.Millisecond))
+	}
+	if passed {
+		b.WriteString("\nResult: PASSED")
+	} else {
+		b.WriteString("\nResult: FAILED")
+	}
+	if detail != "" {
+		b.WriteString("\n\n")
+		b.WriteString(detail)
+	}
+	return b.String()
+}
+
+func buildHostVerificationComment(verification []verifyResult, detail string) string {
+	return workerStatusMarker + "\n" + buildHostVerificationMessage(verification, detail)
+}
+
+func isWorkerStatusComment(body string) bool {
+	return strings.HasPrefix(strings.TrimSpace(body), workerStatusMarker+"\n")
+}
+
+func (w *Worker) reportApp(app *appSession, message string) {
+	if app == nil || message == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := app.report(ctx, message); err != nil {
+		w.log.Printf("desktop verification report: %v", err)
+	}
 }
 
 func gitChanged(ctx context.Context, dir string) (bool, error) {

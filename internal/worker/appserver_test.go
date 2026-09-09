@@ -113,6 +113,48 @@ func TestAppParamsDoNotInheritSecrets(t *testing.T) {
 	}
 }
 
+func TestAppReportInjectsWrapperAuthoredFinalMessage(t *testing.T) {
+	requests := make(chan map[string]json.RawMessage, 1)
+	s := fakeApp(t, func(r map[string]json.RawMessage) []string {
+		requests <- r
+		return []string{`{"id":` + string(r["id"]) + `,"result":{}}`}
+	})
+
+	if err := s.report(context.Background(), "host verification passed"); err != nil {
+		t.Fatal(err)
+	}
+	request := <-requests
+	var method string
+	if err := json.Unmarshal(request["method"], &method); err != nil {
+		t.Fatal(err)
+	}
+	if method != "thread/inject_items" {
+		t.Fatalf("method = %q", method)
+	}
+	var params struct {
+		ThreadID string `json:"threadId"`
+		Items    []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Phase   string `json:"phase"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(request["params"], &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.ThreadID != "thread-1" || len(params.Items) != 1 {
+		t.Fatalf("params = %#v", params)
+	}
+	item := params.Items[0]
+	if item.Type != "message" || item.Role != "assistant" || item.Phase != "final_answer" || len(item.Content) != 1 || item.Content[0].Type != "output_text" || item.Content[0].Text != "host verification passed" {
+		t.Fatalf("item = %#v", item)
+	}
+}
+
 func TestAppServerCommand(t *testing.T) {
 	tests := []struct {
 		cfg  config.Codex
@@ -198,6 +240,9 @@ func TestLiveAppServer(t *testing.T) {
 	reader.threadID = resumed.Thread.ID
 	reader.cfg.Timeout = "1m"
 	if _, err := reader.run(ctx, "Follow the request above."); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.report(ctx, "issue-worker host verification completed.\n\nResult: PASSED"); err != nil {
 		t.Fatal(err)
 	}
 	if err := reader.call(ctx, "thread/archive", map[string]string{"threadId": s.threadID}, nil); err != nil {
