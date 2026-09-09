@@ -171,6 +171,11 @@ file changes. The title shows the current wrapper stage. An empty socket uses th
 stdio app-server transport and normal Codex history. Configure a socket only
 when the machine already has a shared app-server daemon.
 
+With repository `verify` commands configured, Codex is told that host
+verification remains pending after its sandboxed turn. issue-worker appends the
+authoritative pass/fail result to the same task after running the frozen commands;
+it does not grant the Codex turn access to host-only sockets such as Docker.
+
 ## 6. Run diagnostics
 
 Run:
@@ -235,6 +240,10 @@ or pause it with `/issue-worker stop`. `@issue-worker` is an alias. Never enable
 this for untrusted public PR authors, and do not broaden it to fork PRs. During
 follow-up, host-side `setup` and `verify` commands are sourced from the PR base
 branch; never substitute the PR head's `.issue-worker.yml`.
+
+The host verification result is also posted to the PR conversation. The daemon
+marks and ignores its own status comments so they do not recursively trigger
+another follow-up.
 
 ## 8. Test polling without a job
 

@@ -188,8 +188,8 @@ func appThreadParams(cfg config.Codex, dir string) map[string]any {
 	return params
 }
 
-func (w *Worker) openAppSession(ctx context.Context, dir, repo string, issue gh.Issue) (*appSession, error) {
-	return w.openAppSessionForPrompt(ctx, dir, appTaskTitle(repo, issue), buildPrompt(repo, issue))
+func (w *Worker) openAppSession(ctx context.Context, dir, repo string, issue gh.Issue, hasHostVerification bool) (*appSession, error) {
+	return w.openAppSessionForPrompt(ctx, dir, appTaskTitle(repo, issue), buildPrompt(repo, issue, hasHostVerification))
 }
 
 func (w *Worker) openAppSessionForPrompt(ctx context.Context, dir, title, prompt string) (*appSession, error) {
@@ -246,6 +246,19 @@ func (s *appSession) persistIssue(ctx context.Context, prompt string) error {
 		"type":    "message",
 		"role":    "user",
 		"content": []map[string]string{{"type": "input_text", "text": prompt}},
+	}
+	return s.call(ctx, "thread/inject_items", map[string]any{"threadId": s.threadID, "items": []any{item}}, nil)
+}
+
+// report appends a wrapper-authored result to the durable Codex task without
+// starting another model turn. Host verification happens after the Codex turn,
+// so this is the authoritative completion message visible to the operator.
+func (s *appSession) report(ctx context.Context, text string) error {
+	item := map[string]any{
+		"type":    "message",
+		"role":    "assistant",
+		"phase":   "final_answer",
+		"content": []map[string]string{{"type": "output_text", "text": text}},
 	}
 	return s.call(ctx, "thread/inject_items", map[string]any{"threadId": s.threadID, "items": []any{item}}, nil)
 }

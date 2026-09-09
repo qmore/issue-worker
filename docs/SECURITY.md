@@ -135,6 +135,12 @@ environment and requests. The thread retains `workspace-write`, disabled network
 access by default, and non-interactive approvals. Timeout or transport failure
 triggers an explicit turn interruption before wrapper Git operations.
 
+After trusted host verification, the wrapper injects a fixed-format assistant
+message containing only command names, durations, pass/fail state, and optional
+PR/SHA metadata into the same task. It does not copy command output or secrets.
+This reports the authoritative result without granting the Codex turn broader
+host access.
+
 Never:
 
 - commit them
@@ -237,6 +243,10 @@ Therefore:
 - consider a container or separate isolation boundary for higher assurance
 
 A failed verification is a hard gate: no commit, push, or PR should be created.
+
+PR follow-up verification status is also posted as a fixed-format conversation
+comment. The comment contains an internal marker that the monitor ignores,
+preventing a wrapper-authored status update from being treated as new feedback.
 
 The PR records only command text, pass/skip state, and the Actions run URL. Verification stdout/stderr remains in Actions logs and is not intentionally copied into the PR.
 

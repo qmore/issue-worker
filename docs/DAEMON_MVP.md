@@ -172,6 +172,12 @@ worker starts the stdio app-server unless `app_server_socket` selects an existin
 shared daemon. `codex.timeout` bounds the turn, and unfinished work is explicitly
 interrupted before wrapper-owned Git operations continue.
 
+If trusted host verification is configured, Codex is told that the worker will
+run it after the model turn. The daemon then injects a wrapper-authored final
+verification result into the same durable task without starting another model
+turn. Host-only dependency or socket failures inside the sandbox are therefore
+reported as pending rather than as the authoritative job result.
+
 ## Diagnose before running
 
 ```bash
@@ -281,6 +287,10 @@ worktree after restart), runs the frozen repository-local `setup` and `verify`
 commands sourced from the PR base branch, and pushes a wrapper-owned commit to
 the existing head branch. The PR head's `.issue-worker.yml` is untrusted and is
 never used as the source of host-side commands.
+
+After every follow-up, the daemon posts the host verification result both to the
+durable Codex task and to the PR conversation. Wrapper status comments include a
+private marker that the monitor ignores so they cannot trigger another follow-up.
 
 Only open PRs whose head repository exactly matches the configured repository
 are eligible. Fork PRs are rejected. Bot content and commands from other author

@@ -170,6 +170,10 @@ codex:
 The task is named from the repository and Issue. Its title tracks the current
 wrapper stage (`setup`, `codex`, `verification`, `pull-request`, and the terminal
 state), while the full Codex turn contains command and file-change items.
+When trusted `verify` commands are configured, the prompt tells Codex that their
+authoritative result is pending instead of treating unavailable host-only tools
+or sockets as an implementation failure. After those commands run, issue-worker
+appends a wrapper-authored final verification result to the same durable task.
 `backend: exec` remains the default and preserves terminal-only ephemeral runs.
 
 An empty `app_server_socket` starts Codex's stdio app-server for the job and
@@ -254,7 +258,9 @@ review bodies, and failed GitHub Actions runs. issue-worker checks out the PR's
 existing head branch, runs Codex, reuses the repository's trusted `setup` and
 `verify` commands from the PR base branch, then commits and pushes the focused
 update. The PR head's `.issue-worker.yml` is never used for host-side commands.
-Fork PRs, bot
+Each follow-up posts the host verification result to its durable Codex task and
+to the PR conversation. These wrapper-authored PR comments carry an internal
+marker and are ignored by the monitor, preventing feedback loops. Fork PRs, bot
 comments, and commands from other author associations are ignored.
 
 The worker does not merge or deploy the PR. CI failure monitoring uses the

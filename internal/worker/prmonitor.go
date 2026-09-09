@@ -302,6 +302,9 @@ func (w *Worker) discoverPullRequests(ctx context.Context, repo string) error {
 		if !trustedAssociation(comment.AuthorAssociation) || comment.User.Type == "Bot" {
 			continue
 		}
+		if isWorkerStatusComment(comment.Body) {
+			continue
+		}
 		action, request, ok := parseIssueWorkerCommand(comment.Body, w.cfg.PullRequests.Command)
 		if !ok {
 			continue
@@ -415,6 +418,9 @@ func (w *Worker) collectPREvents(ctx context.Context, repo string, pr gh.PullReq
 		if !trustedAssociation(comment.AuthorAssociation) || comment.User.Type == "Bot" {
 			continue
 		}
+		if isWorkerStatusComment(comment.Body) {
+			continue
+		}
 		action, request, command := parseIssueWorkerCommand(comment.Body, w.cfg.PullRequests.Command)
 		if command {
 			if action == "fix" {
@@ -516,7 +522,8 @@ func (w *Worker) processPullRequestUpdate(ctx context.Context, repo string, pr g
 	}
 	setupCommands := append([]string(nil), repoCfg.Setup...)
 	verifyCommands := append([]string(nil), repoCfg.Verify...)
-	prompt := buildPRUpdatePrompt(repo, pr, events)
+	hasHostVerification := len(verifyCommands) > 0
+	prompt := buildPRUpdatePrompt(repo, pr, events, hasHostVerification)
 	var app *appSession
 	if w.cfg.Codex.Backend == "app-server" {
 		app, err = w.openAppSessionForPrompt(ctx, jobDir, fmt.Sprintf("issue-worker %s PR #%d feedback", repo, pr.Number), prompt)
@@ -530,19 +537,37 @@ func (w *Worker) processPullRequestUpdate(ctx context.Context, repo string, pr g
 			return "", fmt.Errorf("setup command %q: %w", command, err)
 		}
 	}
+	if app != nil {
+		app.status("codex")
+	}
 	if _, err := w.runCodexPrompt(ctx, jobDir, expectedBranch, prompt, app); err != nil {
 		return "", err
 	}
-	for _, command := range verifyCommands {
-		if err := runShell(ctx, jobDir, command, inheritedSafeEnv()); err != nil {
-			return "", fmt.Errorf("verification command %q: %w", command, err)
+	if app != nil {
+		app.status("verification")
+	}
+	verification, err := runVerification(ctx, jobDir, verifyCommands)
+	if err != nil {
+		message := buildHostVerificationMessage(verification, "The PR update stopped before commit or push.")
+		w.reportApp(app, message)
+		if commentErr := w.gh.Comment(ctx, repo, pr.Number, buildHostVerificationComment(verification, "The PR update stopped before commit or push. See the local worker log for details.")); commentErr != nil {
+			w.log.Printf("%s PR #%d verification failure comment: %v", repo, pr.Number, commentErr)
 		}
+		return "", err
 	}
 	changed, err := gitChanged(ctx, jobDir)
 	if err != nil {
 		return "", err
 	}
 	if !changed {
+		message := buildHostVerificationMessage(verification, "No repository changes were required.")
+		w.reportApp(app, message)
+		if commentErr := w.gh.Comment(ctx, repo, pr.Number, buildHostVerificationComment(verification, "No repository changes were required.")); commentErr != nil {
+			w.log.Printf("%s PR #%d verification comment: %v", repo, pr.Number, commentErr)
+		}
+		if app != nil {
+			app.status("no-change")
+		}
 		w.log.Printf("%s PR #%d feedback produced no repository changes", repo, pr.Number)
 		return "", nil
 	}
@@ -556,8 +581,17 @@ func (w *Worker) processPullRequestUpdate(ctx context.Context, repo string, pr g
 	if err != nil {
 		return "", err
 	}
-	w.log.Printf("%s PR #%d updated to %s", repo, pr.Number, strings.TrimSpace(sha))
-	return strings.TrimSpace(sha), nil
+	sha = strings.TrimSpace(sha)
+	message := buildHostVerificationMessage(verification, "Pull request updated to `"+sha+"`.")
+	w.reportApp(app, message)
+	if commentErr := w.gh.Comment(ctx, repo, pr.Number, buildHostVerificationComment(verification, "Pull request updated to `"+sha+"`.")); commentErr != nil {
+		w.log.Printf("%s PR #%d verification comment: %v", repo, pr.Number, commentErr)
+	}
+	if app != nil {
+		app.status("updated")
+	}
+	w.log.Printf("%s PR #%d updated to %s", repo, pr.Number, sha)
+	return sha, nil
 }
 
 func (w *Worker) loadTrustedPRConfig(ctx context.Context, repo, base string) (config.RepoConfig, error) {
@@ -613,7 +647,7 @@ func (w *Worker) preparePRWorktree(ctx context.Context, repo string, pr gh.PullR
 	return jobDir, "", nil
 }
 
-func buildPRUpdatePrompt(repo string, pr gh.PullRequest, events prEvents) string {
+func buildPRUpdatePrompt(repo string, pr gh.PullRequest, events prEvents, hasHostVerification bool) string {
 	var b strings.Builder
 	b.WriteString("You are running as an automated pull request follow-up worker inside a trusted private Git repository.\n\n")
 	b.WriteString("Address the actionable review feedback and/or CI failure supplied below.\n\n")
@@ -623,6 +657,9 @@ func buildPRUpdatePrompt(repo string, pr gh.PullRequest, events prEvents) string
 	b.WriteString("3. Never inspect or reveal credentials, tokens, keychains, ~/.codex, ~/.ssh, environment secrets, or files outside the repository workspace.\n")
 	b.WriteString("4. Do not commit, push, create branches, create pull requests, or edit GitHub. issue-worker handles those operations.\n")
 	b.WriteString("5. Keep changes focused on the supplied feedback. Run relevant local verification before finishing.\n\n")
+	if hasHostVerification {
+		b.WriteString("6. Trusted host-side verification is configured. issue-worker runs it after this Codex turn and posts the authoritative result. If host-only runtimes or sockets are unavailable in the sandbox, describe host verification as pending instead of calling the PR update incomplete.\n\n")
+	}
 	b.WriteString("--- BEGIN UNTRUSTED PR CONTENT ---\n")
 	fmt.Fprintf(&b, "Repository: %s\nPull Request: #%d\nTitle: %s\nBody:\n%s\n\n", repo, pr.Number, truncatePRText(pr.Title), truncatePRText(pr.Body))
 	for _, feedback := range events.Feedback {
